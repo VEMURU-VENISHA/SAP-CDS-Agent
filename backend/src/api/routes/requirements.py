@@ -1,11 +1,17 @@
 """Requirements Intake and Analysis API Routes."""
 
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from src.agents.orchestrator import CDSWorkflowOrchestrator
 from src.agents.state import CDSWorkflowState
-from src.models.domain import BusinessRequirement, Decision, TargetUseCase
+from src.models.domain import (
+    BusinessRequirement,
+    CandidateEvaluation,
+    Decision,
+    StructuredRequirement,
+    TargetUseCase,
+)
 
 router = APIRouter(prefix="/requirements", tags=["Requirements"])
 orchestrator = CDSWorkflowOrchestrator()
@@ -23,6 +29,8 @@ class RequirementCreatePayload(BaseModel):
 
 class PipelineExecutionResponse(BaseModel):
     requirement: BusinessRequirement
+    structured_requirement: Optional[StructuredRequirement] = None
+    evaluated_candidates: List[CandidateEvaluation] = []
     decision: Decision
     generated_code_preview: str = ""
     current_step: str
@@ -68,6 +76,8 @@ async def analyze_requirement(payload: RequirementCreatePayload):
 
     return PipelineExecutionResponse(
         requirement=req,
+        structured_requirement=final_state.get("structured_requirement"),
+        evaluated_candidates=final_state.get("evaluated_candidates", []),
         decision=decision,
         generated_code_preview=final_state.get("generated_cds_code") or "",
         current_step=final_state.get("current_step", "COMPLETED"),

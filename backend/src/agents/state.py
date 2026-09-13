@@ -4,11 +4,13 @@ from typing import Any, Dict, List, Optional
 from typing_extensions import TypedDict
 from src.models.domain import (
     BusinessRequirement,
+    CandidateEvaluation,
     CDSCandidate,
     DataModel,
     Decision,
     DeploymentRequest,
     FieldMapping,
+    StructuredRequirement,
     ValidationResult,
 )
 
@@ -18,9 +20,11 @@ class CDSWorkflowState(TypedDict, total=False):
 
     # 1. Input Stage
     requirement: Optional[BusinessRequirement]
+    structured_requirement: Optional[StructuredRequirement]
 
     # 2. Discovery & Mapping Stage
     candidates: List[CDSCandidate]
+    evaluated_candidates: List[CandidateEvaluation]
     field_mappings: List[FieldMapping]
 
     # 3. Decision Stage

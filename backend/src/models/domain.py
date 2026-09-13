@@ -44,13 +44,25 @@ class MappingType(str, Enum):
     DIRECT_MATCH = "DIRECT_MATCH"
     ASSOCIATION_HOP = "ASSOCIATION_HOP"
     CALCULATED = "CALCULATED"
+    UNRESOLVED = "UNRESOLVED"
     MISSING = "MISSING"
 
 
+class EvidenceLevel(str, Enum):
+    LEVEL_1_EXACT_FIELD = "LEVEL_1_EXACT_FIELD"
+    LEVEL_2_LABEL_MATCH = "LEVEL_2_LABEL_MATCH"
+    LEVEL_3_VERIFIED_ASSOCIATION = "LEVEL_3_VERIFIED_ASSOCIATION"
+    LEVEL_4_HEURISTIC_SYNONYM = "LEVEL_4_HEURISTIC_SYNONYM"
+    LEVEL_5_UNVERIFIED_SUGGESTION = "LEVEL_5_UNVERIFIED_SUGGESTION"
+    LEVEL_6_MISSING = "LEVEL_6_MISSING"
+
+
 class DecisionAction(str, Enum):
-    REUSE = "REUSE"      # Use existing standard SAP CDS view as-is
-    EXTEND = "EXTEND"    # Extend standard SAP CDS view with new fields/associations
-    CREATE = "CREATE"    # Generate brand-new custom CDS view entity
+    REUSE = "REUSE"                          # Standard SAP CDS view satisfies 100% of concepts
+    EXTEND = "EXTEND"                        # Missing concepts verified obtainable via extension
+    CREATE = "CREATE"                        # Custom CDS required or 0 suitable views
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"  # Ambiguous/incomplete metadata halts decision
+
 
 
 class DeploymentStatus(str, Enum):
@@ -104,6 +116,17 @@ class CDSCandidate(BaseModel):
     is_extendable: bool = Field(default=True, description="Whether the CDS view entity supports extension")
 
 
+class StructuredRequirement(BaseModel):
+    """Fine-grained semantic representation of user requirements."""
+
+    dimensions: List[str] = Field(default_factory=list, description="Business dimensions (e.g. SalesOrder, Customer)")
+    measures: List[str] = Field(default_factory=list, description="Business measures (e.g. NetAmount, OrderQuantity)")
+    attributes: List[str] = Field(default_factory=list, description="Descriptive attributes (e.g. CreationDate, Status)")
+    parameters: List[str] = Field(default_factory=list, description="Input parameters (e.g. P_DisplayCurrency)")
+    filters: List[str] = Field(default_factory=list, description="Requested filter conditions")
+    all_requested_concepts: List[str] = Field(default_factory=list, description="Consolidated unique list of all requested concepts")
+
+
 class FieldMapping(BaseModel):
     """Represents the semantic mapping between a requested requirement field and a candidate CDS field."""
 
@@ -112,16 +135,35 @@ class FieldMapping(BaseModel):
     source_entity: Optional[str] = Field(default=None, description="Originating CDS view or joined table")
     data_type: Optional[str] = Field(default=None, description="ABAP dictionary data type (e.g., abap.char(10))")
     mapping_type: MappingType = Field(default=MappingType.MISSING, description="Mapping classification")
+    evidence_level: EvidenceLevel = Field(default=EvidenceLevel.LEVEL_6_MISSING, description="Strict evidence tier (Level 1-6)")
+    evidence_detail: str = Field(default="", description="Detailed human-readable evidence justifying the mapping")
+    association_target_view: Optional[str] = Field(default=None, description="Target CDS view if verified association hop")
+    association_target_field: Optional[str] = Field(default=None, description="Target field on verified association view")
     transformation_rule: Optional[str] = Field(default=None, description="Calculation formula or transformation expression")
     confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="Mapping confidence score")
 
 
+class CandidateEvaluation(BaseModel):
+    """Detailed multi-factor evaluation of a real SAP CDS view candidate."""
+
+    candidate: CDSCandidate
+    rank: int = Field(default=1, description="Rank among discovered candidates")
+    rank_score: float = Field(default=0.0, description="Composite ranking score (0-100)")
+    coverage_percentage: float = Field(default=0.0, description="Percentage of requested concepts satisfied")
+    matched_concepts: List[str] = Field(default_factory=list, description="List of satisfied concept names")
+    missing_concepts: List[str] = Field(default_factory=list, description="List of unsatisfied concept names")
+    field_mappings: List[FieldMapping] = Field(default_factory=list, description="Itemized concept-to-field mappings")
+    scoring_breakdown: Dict[str, float] = Field(default_factory=dict, description="Exposed heuristic scoring weights and components")
+    is_extension_viable: bool = Field(default=False, description="Whether missing concepts are verified obtainable via extension")
+    suitability_reason: str = Field(default="", description="Human-readable justification for candidate score and rank")
+
+
 class Decision(BaseModel):
-    """Outcome of the Decision Agent: recommendation of REUSE, EXTEND, or CREATE."""
+    """Outcome of the Decision Agent: recommendation of REUSE, EXTEND, CREATE, or INSUFFICIENT_EVIDENCE."""
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     requirement_id: str = Field(..., description="ID of the evaluated BusinessRequirement")
-    action: DecisionAction = Field(..., description="Recommended action: REUSE, EXTEND, or CREATE")
+    action: DecisionAction = Field(..., description="Recommended action: REUSE, EXTEND, CREATE, or INSUFFICIENT_EVIDENCE")
     recommended_view: Optional[str] = Field(default=None, description="Existing CDS view name to reuse or extend")
     confidence_score: float = Field(..., ge=0.0, le=1.0, description="Agent confidence score")
     fit_percentage: float = Field(..., ge=0.0, le=100.0, description="Percentage of requirement fulfilled by base view")
@@ -129,6 +171,12 @@ class Decision(BaseModel):
     missing_fields: List[str] = Field(default_factory=list, description="Requested fields not present in base view")
     proposed_extension_name: Optional[str] = Field(default=None, description="Proposed extension name if action is EXTEND")
     proposed_new_view_name: Optional[str] = Field(default=None, description="Proposed new CDS view name if action is CREATE")
+    requires_composition: bool = Field(default=False, description="True if multi-CDS composition is required")
+    complementary_views: List[str] = Field(default_factory=list, description="Complementary CDS candidates for multi-CDS composition")
+    evaluated_candidates: List[CandidateEvaluation] = Field(default_factory=list, description="Ranked evaluations of all considered SAP candidates")
+    structured_requirement: Optional[StructuredRequirement] = Field(default=None, description="Structured breakdown of concepts")
+    evidence_summary: List[str] = Field(default_factory=list, description="Summary of verified evidence items")
+    warnings: List[str] = Field(default_factory=list, description="Governance, architectural, or ambiguity warnings")
     tradeoffs: List[str] = Field(default_factory=list, description="Architectural tradeoffs and clean core impact notes")
     human_approval_required: bool = Field(default=True, description="Enforces human gatekeeper before any code deployment")
     is_approved: bool = Field(default=False, description="Whether human reviewer has signed off")
