@@ -31,6 +31,7 @@ def create_test_settings(
     auth_type: str = "basic",
     username: str = "DEV_USER",
     password: str = "SuperSecret123",
+    send_client_param: bool = True,
 ) -> Settings:
     return Settings(
         SAP_CONNECTOR_ENABLED=enabled,
@@ -43,6 +44,7 @@ def create_test_settings(
         SAP_PASSWORD=SecretStr(password),
         SAP_API_TOKEN=SecretStr(""),
         SAP_VERIFY_SSL=True,
+        SAP_SEND_CLIENT_PARAM=send_client_param,
         SAP_REQUEST_TIMEOUT_SECONDS=5,
     )
 
@@ -83,7 +85,6 @@ async def test_client_get_ddl_source_success():
     assert len(requested_urls) == 1
     # Check that it called the verified endpoint with singular ddl and lowercase name
     assert "/sap/bc/adt/ddic/ddl/sources/i_salesorder" in requested_urls[0]
-    assert "sap-client=100" in requested_urls[0]
 
 
 @pytest.mark.asyncio

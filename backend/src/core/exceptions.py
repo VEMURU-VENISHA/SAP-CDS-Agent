@@ -139,6 +139,18 @@ class SAPConnectionError(SAPConnectorError):
         )
 
 
+class SAPSecurityError(SAPConnectorError):
+    """Raised when a pre-socket security guard or zero-write policy violation is detected."""
+
+    def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="SAP_SECURITY_VIOLATION",
+            status_code=403,
+            details=details,
+        )
+
+
 class GovernanceApprovalRequiredError(PlatformBaseException):
     """Raised when an operation (such as CDS draft creation or activation) requires explicit human sign-off."""
 

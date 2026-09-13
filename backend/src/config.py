@@ -1,7 +1,7 @@
 """Application Configuration Module using Pydantic Settings."""
 
 from functools import lru_cache
-from typing import List, Union
+from typing import List, Optional, Union
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -55,6 +55,16 @@ class Settings(BaseSettings):
     SAP_S4CORE_RELEASE: str = "108 SP03"
     SAP_BASIS_RELEASE: str = "758 SP03"
 
+    # Mandatory Live Read-Only Safety Gates
+    SAP_LIVE_READ_ONLY: bool = Field(
+        default=False,
+        description="Mandatory kill switch: must be True for any live SAP request. If False, live requests are rejected.",
+    )
+    SAP_LIVE_TEST_ENABLED: bool = Field(
+        default=False,
+        description="Explicit opt-in flag required to un-skip live integration test suite.",
+    )
+
     # SAP ADT Network & Auth Settings
     SAP_BASE_URL: str = Field(
         default="",
@@ -62,7 +72,7 @@ class Settings(BaseSettings):
     )
     SAP_AUTH_TYPE: str = Field(
         default="basic",
-        description="Authentication mechanism: 'basic' or 'token'",
+        description="Authentication mechanism: 'basic' or 'token' (configurable, not hard-coded protocol requirement)",
     )
     SAP_USERNAME: str = Field(
         default="",
@@ -78,7 +88,15 @@ class Settings(BaseSettings):
     )
     SAP_VERIFY_SSL: bool = Field(
         default=True,
-        description="Whether to enforce SSL/TLS certificate validation",
+        description="Whether to enforce SSL/TLS certificate validation (secure default: True)",
+    )
+    SAP_CA_BUNDLE_PATH: Optional[str] = Field(
+        default=None,
+        description="Optional filesystem path to custom corporate CA root certificate bundle",
+    )
+    SAP_SEND_CLIENT_PARAM: bool = Field(
+        default=False,
+        description="Whether to append sap-client query parameter (configuration-dependent, not system-verified requirement)",
     )
     SAP_REQUEST_TIMEOUT_SECONDS: int = Field(
         default=15,

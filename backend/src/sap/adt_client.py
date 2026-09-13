@@ -10,7 +10,7 @@ Enterprise Safety & Hygiene:
 """
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import httpx
 from src.config import Settings, get_settings
 from src.core.exceptions import (
@@ -20,6 +20,7 @@ from src.core.exceptions import (
     SAPConnectorError,
     SAPNotFoundError,
     SAPPermissionError,
+    SAPSecurityError,
 )
 from src.logging_config import logger
 from src.models.domain import SAPCheckMessage, SAPCheckrunResult, SAPValidationStatus
@@ -52,15 +53,83 @@ class SAPADTClient:
                     "SAP_API_TOKEN is required for 'token' authentication."
                 )
 
+    def _assert_zero_write_policy(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Pre-socket zero-write interceptor.
+
+        Enforces that before any TCP/TLS handshake is initiated:
+        1. If running against a real SAP host (not using custom mock client), SAP_LIVE_READ_ONLY must be True.
+        2. The request MUST match the exact verified read-only allowlist:
+           - GET /sap/bc/adt/repository/informationsystem/search
+           - GET /sap/bc/adt/ddic/ddl/sources/{name}
+           - POST /sap/bc/adt/checkruns?reporters=abapCheckRun
+        3. All other methods and paths (PUT, DELETE, PATCH, or other POSTs) are unconditionally rejected.
+        """
+        clean_method = method.strip().upper()
+        clean_path = path.strip()
+
+        # Check 1: Exact Zero-Write Allowlist (Methods & Paths)
+        if clean_method == "GET":
+            is_search = clean_path == "/sap/bc/adt/repository/informationsystem/search"
+            is_ddl_source = bool(re.match(r"^/sap/bc/adt/ddic/ddl/sources/[a-zA-Z0-9_\/]+$", clean_path))
+            if not (is_search or is_ddl_source):
+                raise SAPSecurityError(
+                    f"Pre-socket security guard blocked non-allowlisted GET endpoint: '{clean_path}'. "
+                    "Only verified read-only search and DDL source endpoints are permitted."
+                )
+
+        elif clean_method == "POST":
+            is_checkrun = clean_path == "/sap/bc/adt/checkruns"
+            has_checkrun_reporter = False
+            if params and params.get("reporters") == "abapCheckRun":
+                has_checkrun_reporter = True
+            elif "reporters=abapCheckRun" in clean_path:
+                has_checkrun_reporter = True
+
+            if not (is_checkrun and has_checkrun_reporter):
+                raise SAPSecurityError(
+                    f"Pre-socket security guard blocked unauthorized POST to: '{clean_path}'. "
+                    "Only POST /sap/bc/adt/checkruns?reporters=abapCheckRun is permitted."
+                )
+
+        else:
+            raise SAPSecurityError(
+                f"Pre-socket security guard blocked modifying HTTP method '{clean_method}' on '{clean_path}'. "
+                "All modifying methods (PUT, DELETE, PATCH, POST-create) are strictly forbidden."
+            )
+
+        # Check 2: Mandatory kill switch for live execution (when not using custom mock client)
+        if self._custom_client is None and not self.settings.SAP_LIVE_READ_ONLY:
+            raise SAPSecurityError(
+                "Live execution refused: SAP_LIVE_READ_ONLY is not enabled. "
+                "The live connector refuses to open network sockets unless SAP_LIVE_READ_ONLY=true."
+            )
+
+    def assert_zero_write_policy(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Public alias for pre-socket zero-write policy check."""
+        self._assert_zero_write_policy(method, path, params)
+
     def _get_auth_headers(self) -> Dict[str, str]:
         """Constructs headers without exposing them in logs or traces."""
         headers: Dict[str, str] = {
             "Accept": "text/plain, application/xml, application/vnd.sap.adt.ddic.ddls.sources.v2+xml, */*",
-            "sap-client": self.settings.SAP_CLIENT,
         }
+        # Client query or header is configuration-dependent; only sent if explicitly enabled
+        if self.settings.SAP_SEND_CLIENT_PARAM and self.settings.SAP_CLIENT:
+            headers["sap-client"] = self.settings.SAP_CLIENT
         if self.settings.SAP_AUTH_TYPE == "token":
             token_str = self.settings.SAP_API_TOKEN.get_secret_value()
-            headers["Authorization"] = f"Bearer {token_str}"
+            if token_str:
+                headers["Authorization"] = f"Bearer {token_str}"
         return headers
 
     def _get_auth_tuple(self) -> Optional[httpx.BasicAuth]:
@@ -77,7 +146,7 @@ class SAPADTClient:
         return re.sub(r"([?&](?:token|password|secret|key)=)[^&]+", r"\1***", str(url), flags=re.IGNORECASE)
 
     def _log_request(self, method: str, path: str, status_code: Optional[int] = None) -> None:
-        """Emits sanitized, audit-safe log messages."""
+        """Emits sanitized, audit-safe log messages. Never emits credentials or auth headers."""
         clean_path = self._sanitize_url_for_logging(path)
         if status_code is not None:
             logger.info(
@@ -98,14 +167,19 @@ class SAPADTClient:
             )
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Creates or returns an active httpx client with configured SSL and timeout settings."""
+        """Creates or returns an active httpx client with configured SSL, redirect, and timeout settings."""
         if self._custom_client is not None:
             return self._custom_client
 
         base_url = self.settings.SAP_BASE_URL.rstrip("/")
+        verify_ssl: Union[bool, str] = self.settings.SAP_VERIFY_SSL
+        if self.settings.SAP_CA_BUNDLE_PATH and self.settings.SAP_CA_BUNDLE_PATH.strip():
+            verify_ssl = self.settings.SAP_CA_BUNDLE_PATH.strip()
+
         return httpx.AsyncClient(
             base_url=base_url,
-            verify=self.settings.SAP_VERIFY_SSL,
+            verify=verify_ssl,
+            follow_redirects=False,
             timeout=float(self.settings.SAP_REQUEST_TIMEOUT_SECONDS),
             auth=self._get_auth_tuple(),
         )
@@ -117,17 +191,20 @@ class SAPADTClient:
         Evidence: VERIFIED IN SYSTEM (observed directly in Eclipse ADT communication log).
         """
         self._validate_config()
-        # SAP ADT accepts lowercase or exact name
         clean_name = object_name.strip().lower()
         path = f"/sap/bc/adt/ddic/ddl/sources/{clean_name}"
-        params = {"sap-client": self.settings.SAP_CLIENT}
-        headers = self._get_auth_headers()
+        params: Dict[str, Any] = {}
+        if self.settings.SAP_SEND_CLIENT_PARAM and self.settings.SAP_CLIENT:
+            params["sap-client"] = self.settings.SAP_CLIENT
 
+        # Pre-socket zero-write security check
+        self._assert_zero_write_policy("GET", path, params)
+
+        headers = self._get_auth_headers()
         self._log_request("GET", path)
 
         try:
             client = await self._get_client()
-            # If using custom client, manage closure outside; if created here, use context manager
             if self._custom_client is not None:
                 resp = await client.get(path, params=params, headers=headers)
             else:
@@ -159,28 +236,46 @@ class SAPADTClient:
         except httpx.ConnectError as e:
             logger.error("Failed to establish connection to SAP: %s", e)
             raise SAPConnectionError(f"Failed to connect to SAP host: {e}")
-        except (SAPAuthenticationError, SAPPermissionError, SAPNotFoundError, SAPConnectorError):
+        except (SAPAuthenticationError, SAPPermissionError, SAPNotFoundError, SAPConnectorError, SAPSecurityError):
             raise
         except Exception as e:
             logger.error("Unexpected error in SAP ADT client: %s", e)
             raise SAPConnectorError(f"SAP client unexpected error: {e}")
 
     async def check_connectivity(self) -> bool:
-        """Lightweight connection probe testing whether the SAP ADT host is online and authenticated.
+        """Phase 1: Real SAP ADT Read-Only Smoke Test.
 
-        Attempts GET /sap/bc/adt/discovery (or root ADT tree).
+        Proves actual authenticated ADT REST interaction (rather than merely TCP reachability)
+        by issuing a verified read-only repository search query with maxResults=1.
         Returns True if HTTP 200/304 is returned.
         Raises typed errors on auth/permission failure, or returns False on unreachable host.
         """
         try:
             self._validate_config()
         except SAPConfigurationError as e:
-            logger.warning("SAP connectivity check aborted: %s", e)
+            logger.warning("SAP connectivity smoke test aborted: %s", e)
             return False
 
-        path = "/sap/bc/adt/discovery"
-        params = {"sap-client": self.settings.SAP_CLIENT}
+        path = "/sap/bc/adt/repository/informationsystem/search"
+        params: Dict[str, Any] = {
+            "operation": "quickSearch",
+            "query": "I_SalesOrder",
+            "maxResults": "1",
+        }
+        if self.settings.SAP_SEND_CLIENT_PARAM and self.settings.SAP_CLIENT:
+            params["sap-client"] = self.settings.SAP_CLIENT
+
+        # Pre-socket zero-write security check
+        try:
+            self._assert_zero_write_policy("GET", path, params)
+        except SAPSecurityError as e:
+            logger.warning("SAP ADT smoke test blocked by security guard: %s", e)
+            return False
+
         headers = self._get_auth_headers()
+        headers["Accept"] = (
+            "application/xml, text/xml, application/vnd.sap.adt.repository.informationsystem.search.v1+xml, */*"
+        )
 
         try:
             client = await self._get_client()
@@ -194,15 +289,14 @@ class SAPADTClient:
             if resp.status_code in (200, 304):
                 return True
             if resp.status_code == 401:
-                logger.warning("SAP ADT connectivity test failed: 401 Unauthorized")
+                logger.warning("SAP ADT smoke test failed: 401 Unauthorized. Verify credentials.")
                 return False
             if resp.status_code == 403:
-                logger.warning("SAP ADT connectivity test failed: 403 Forbidden")
+                logger.warning("SAP ADT smoke test failed: 403 Forbidden. Verify S_ADT_RES authorizations.")
                 return False
-            # Some SAP systems return 404 on discovery root but allow DDL sources
             return resp.status_code < 500
         except Exception as e:
-            logger.warning("SAP ADT connectivity probe failed: %s", e)
+            logger.warning("SAP ADT smoke test failed: %s", e)
             return False
 
     @staticmethod
@@ -276,6 +370,12 @@ class SAPADTClient:
             "query": formatted_query,
             "maxResults": str(effective_max),
         }
+        if self.settings.SAP_SEND_CLIENT_PARAM and self.settings.SAP_CLIENT:
+            params["sap-client"] = self.settings.SAP_CLIENT
+
+        # Pre-socket zero-write security check
+        self._assert_zero_write_policy("GET", path, params)
+
         headers = self._get_auth_headers()
         headers["Accept"] = (
             "application/xml, text/xml, application/vnd.sap.adt.repository.informationsystem.search.v1+xml, */*"
@@ -315,7 +415,7 @@ class SAPADTClient:
         except httpx.ConnectError as e:
             logger.error("Failed to connect to SAP during search: %s", e)
             raise SAPConnectionError(f"Failed to connect to SAP host: {e}")
-        except (SAPAuthenticationError, SAPPermissionError, SAPConnectorError):
+        except (SAPAuthenticationError, SAPPermissionError, SAPConnectorError, SAPSecurityError):
             raise
         except Exception as e:
             logger.error("Unexpected error in SAP repository search: %s", e)
@@ -515,6 +615,21 @@ class SAPADTClient:
 
         path = "/sap/bc/adt/checkruns"
         params = {"reporters": "abapCheckRun"}
+        if self.settings.SAP_SEND_CLIENT_PARAM and self.settings.SAP_CLIENT:
+            params["sap-client"] = self.settings.SAP_CLIENT
+
+        # Pre-socket zero-write security check
+        try:
+            self._assert_zero_write_policy("POST", path, params)
+        except SAPSecurityError as e:
+            logger.warning("SAP ADT checkrun blocked by pre-socket security guard: %s", e)
+            return SAPCheckrunResult(
+                status=SAPValidationStatus.UNAVAILABLE,
+                reporter="abapCheckRun",
+                triggering_uri=repository_uri,
+                reason=f"Security guard blocked execution: {e}",
+            )
+
         body = self._build_checkrun_xml(repository_uri, version=version)
         headers = self._get_auth_headers()
         headers["Content-Type"] = "application/vnd.sap.adt.checkobjects+xml"

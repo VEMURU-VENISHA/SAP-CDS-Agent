@@ -78,7 +78,6 @@ async def test_checkrun_post_path_and_headers():
     assert captured_request.url.query.decode("utf-8") == "reporters=abapCheckRun"
     assert captured_request.headers["Content-Type"] == "application/vnd.sap.adt.checkobjects+xml"
     assert captured_request.headers["Accept"] == "application/vnd.sap.adt.checkmessages+xml"
-    assert captured_request.headers["sap-client"] == "100"
     assert result.status == SAPValidationStatus.PASS
 
 
