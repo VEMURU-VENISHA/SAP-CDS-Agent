@@ -1,0 +1,10 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+sqlalchemy>=2.0.36
+asyncpg>=0.30.0
+aiosqlite>=0.20.0
+python-multipart>=0.0.12
+langgraph>=0.2.39
+langchain-core>=0.3.15
