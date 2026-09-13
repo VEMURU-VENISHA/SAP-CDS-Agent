@@ -35,18 +35,19 @@ class DecisionAgent(BaseAgent):
                 requirement_id=req.id,
                 action=DecisionAction.CREATE,
                 recommended_view=None,
-                confidence_score=0.90,
+                confidence_score=0.50,
                 fit_percentage=0.0,
                 rationale=(
-                    "No matching standard SAP CDS views available or connected. "
-                    "Recommending synthesizing a custom CDS View Entity following SAP clean-core standards."
+                    "SAP connector is in unconnected mode (Milestone 1 guardrail). "
+                    "Cannot verify standard SAP S/4HANA VDM view reuse without live catalog discovery. "
+                    "Recommending custom CDS View Entity skeleton draft pending live SAP connection."
                 ),
                 missing_fields=req.required_fields,
                 proposed_new_view_name=f"ZC_{req.title.replace(' ', '')[:20]}",
                 tradeoffs=[
                     "Custom lifecycle maintenance required.",
                     "Full control over associations and field projections.",
-                    "Clean core compliance verified before generation.",
+                    "Clean-core compliance verified prior to deployment.",
                 ],
                 human_approval_required=True,
                 is_approved=False,

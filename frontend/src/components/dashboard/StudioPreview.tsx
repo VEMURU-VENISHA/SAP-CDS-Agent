@@ -10,7 +10,7 @@ export const StudioPreview: React.FC = () => {
         <div className="flex items-center space-x-2">
           <Layers className="w-4 h-4 text-blue-400" />
           <span className="text-sm font-semibold text-gray-200">
-            Enterprise CDS Studio (React Flow & Monaco Editor Foundation)
+            Data Model & CDS Studio Foundation
           </span>
         </div>
         <div className="flex space-x-1 bg-gray-950 p-1 rounded-lg border border-gray-800">
@@ -43,12 +43,12 @@ export const StudioPreview: React.FC = () => {
           <div>
             <h4 className="text-xs font-semibold text-gray-200">React Flow Canvas Architecture</h4>
             <p className="text-[11px] text-gray-400 max-w-md mt-1">
-              Visual entity-relationship graph canvas scaffolded with <code className="text-blue-400">@xyflow/react</code>. Ready to render CDS View Entity nodes, associations (<code className="text-blue-400">[1..1]</code>, <code className="text-blue-400">[0..*]</code>), and join edges.
+              Visual entity-relationship canvas scaffolded with <code className="text-blue-400">@xyflow/react</code>. Ready to render live CDS View Entity nodes, associations (<code className="text-blue-400">[1..1]</code>, <code className="text-blue-400">[0..*]</code>), and join edges once SAP discovery is connected.
             </p>
           </div>
-          <div className="flex items-center space-x-2 text-[10px] text-gray-500 bg-gray-900 px-3 py-1 rounded-full border border-gray-800">
-            <Info className="w-3 h-3" />
-            <span>Nodes: I_SalesOrder, I_Customer, I_SalesOrderItem</span>
+          <div className="flex items-center space-x-2 text-[10px] text-gray-400 bg-gray-900 px-3 py-1 rounded-full border border-gray-800">
+            <Info className="w-3 h-3 text-amber-400" />
+            <span>No real SAP discovery data loaded (System unconnected — Canvas ready for live objects)</span>
           </div>
         </div>
       ) : (
@@ -57,14 +57,14 @@ export const StudioPreview: React.FC = () => {
             <Code className="w-6 h-6" />
           </div>
           <div>
-            <h4 className="text-xs font-semibold text-gray-200">Monaco Editor Integration</h4>
+            <h4 className="text-xs font-semibold text-gray-200">Monaco Editor Foundation</h4>
             <p className="text-[11px] text-gray-400 max-w-md mt-1">
-              Embedded ABAP CDS DDL editor foundation scaffolded with <code className="text-emerald-400">@monaco-editor/react</code>. Supports CDS annotations syntax highlighting, auto-completion, and live syntax validation.
+              Embedded ABAP CDS DDL editor scaffolded with <code className="text-emerald-400">@monaco-editor/react</code>. Built to support CDS annotations syntax highlighting, auto-completion, and live ADT syntax check upon SAP connection.
             </p>
           </div>
-          <div className="flex items-center space-x-2 text-[10px] text-gray-500 bg-gray-900 px-3 py-1 rounded-full border border-gray-800">
-            <Info className="w-3 h-3" />
-            <span>Grammar: ABAP Core Data Services (CDS View Entities)</span>
+          <div className="flex items-center space-x-2 text-[10px] text-gray-400 bg-gray-900 px-3 py-1 rounded-full border border-gray-800">
+            <Info className="w-3 h-3 text-amber-400" />
+            <span>Editor Grammar: ABAP CDS View Entities (Awaiting live SAP DDL via ADT)</span>
           </div>
         </div>
       )}

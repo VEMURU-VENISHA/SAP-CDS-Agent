@@ -58,7 +58,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       <div className="p-4 border-t border-gray-800 text-[11px] text-gray-500 space-y-1">
         <div>Architecture: <span className="text-gray-300">Clean Core / VDM</span></div>
         <div>Release Target: <span className="text-gray-300">S/4HANA 2023</span></div>
-        <div className="text-blue-400 pt-1 font-mono">ADT Transport: DEVK900010</div>
+        <div className="text-gray-400 pt-1 font-mono">ADT Transport: None (Unconnected)</div>
       </div>
     </aside>
   );

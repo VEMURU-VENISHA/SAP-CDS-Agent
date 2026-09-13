@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldCheck, Server, AlertTriangle } from 'lucide-react';
+import { Server, AlertTriangle } from 'lucide-react';
 import { HealthStatus } from '../../types';
 
 interface HeaderProps {
@@ -19,7 +19,14 @@ export const Header: React.FC<HeaderProps> = ({ health, loading }) => {
             SAP CDS Intelligence & Automation Platform
           </h1>
           <p className="text-xs text-gray-400">
-            Target System: <span className="text-blue-400 font-mono">DEV (Client 100)</span> | Release: <span className="text-gray-300">S/4HANA 2023 (S4CORE 108 SP03)</span>
+            Target System:{' '}
+            <span className="text-blue-400 font-mono">
+              {health?.sap_connector?.system_id ?? 'DEV'} (Client {health?.sap_connector?.client ?? '100'})
+            </span>{' '}
+            | Mode:{' '}
+            <span className="text-amber-400 font-mono">
+              {health?.sap_connector?.status ?? 'Unconnected (Guarded)'}
+            </span>
           </p>
         </div>
       </div>
@@ -36,7 +43,7 @@ export const Header: React.FC<HeaderProps> = ({ health, loading }) => {
           <Server className="w-3.5 h-3.5 text-gray-400" />
           <span className="text-gray-400">Backend:</span>
           {loading ? (
-            <span className="text-gray-500 animate-pulse">Connecting...</span>
+            <span className="text-gray-500 animate-pulse">Checking...</span>
           ) : health?.status === 'healthy' ? (
             <span className="flex items-center text-emerald-400 font-medium">
               <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block mr-1.5 animate-pulse"></span>
@@ -54,7 +61,7 @@ export const Header: React.FC<HeaderProps> = ({ health, loading }) => {
           </div>
           <div className="text-left hidden md:block">
             <div className="text-xs font-medium text-gray-200">ABAP Lead Architect</div>
-            <div className="text-[10px] text-gray-400">Senior Reviewer</div>
+            <div className="text-[10px] text-gray-400">Role: Reviewer</div>
           </div>
         </div>
       </div>

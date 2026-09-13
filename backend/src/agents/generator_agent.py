@@ -36,15 +36,25 @@ class CDSGeneratorAgent(BaseAgent):
         view_name = decision.proposed_new_view_name or "ZC_CustomCDSView"
         field_projections = "\n  ".join([f"{f}," for f in req.required_fields]) if req.required_fields else "ID,"
 
-        code_template = f"""@EndUserText.label: '{req.title}'
+        # Determine base entity from requirement hints without claiming fake SAP existence
+        if req.required_entities:
+            entity_hint = req.required_entities[0].strip()
+            base_entity = entity_hint if entity_hint.startswith("I_") else f"I_{entity_hint}"
+        else:
+            base_entity = "I_BusinessEntityPlaceholder"
+
+        code_template = f"""/* ========================================================================= */
+/* DRAFT SKELETON: Synthesized in UNCONNECTED mode                           */
+/* Live SAP metadata, fields, and joins will be validated upon SAP connect. */
+/* ========================================================================= */
+@EndUserText.label: '{req.title}'
 @AccessControl.authorizationCheck: #CHECK
 @Metadata.allowExtensions: true
 define view entity {view_name}
-  as select from I_SalesOrder
+  as select from {base_entity}
 {{
   {field_projections}
-  /* Associations placeholder */
-  _Item
+  /* Associations to be resolved via SAP Discovery Agent upon connection */
 }}
 """
         state["generated_cds_code"] = code_template
