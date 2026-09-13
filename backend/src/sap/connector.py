@@ -115,9 +115,24 @@ class UnconnectedSAPConnector(ISAPConnector):
 _connector_instance: Optional[ISAPConnector] = None
 
 
-def get_sap_connector() -> ISAPConnector:
-    """Dependency injection provider for SAP connector."""
+def get_sap_connector(settings: Optional[Settings] = None) -> ISAPConnector:
+    """Dependency injection provider for SAP connector.
+
+    Returns SAPADTConnector when enabled and configured as 'adt',
+    otherwise returns UnconnectedSAPConnector to preserve honest empty states.
+    """
     global _connector_instance
     if _connector_instance is None:
-        _connector_instance = UnconnectedSAPConnector()
+        active_settings = settings or get_settings()
+        if active_settings.SAP_CONNECTOR_ENABLED and active_settings.SAP_CONNECTOR_TYPE == "adt":
+            from src.sap.adt_connector import SAPADTConnector
+            _connector_instance = SAPADTConnector(settings=active_settings)
+        else:
+            _connector_instance = UnconnectedSAPConnector(settings=active_settings)
     return _connector_instance
+
+
+def reset_sap_connector() -> None:
+    """Resets the singleton connector instance (useful for unit testing configurations)."""
+    global _connector_instance
+    _connector_instance = None

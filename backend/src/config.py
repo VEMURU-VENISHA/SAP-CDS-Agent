@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 from typing import List, Union
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,14 +46,44 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
 
-    # SAP Environment Metadata (Config only - no direct connection in Milestone 1)
+    # SAP Environment Configuration
     SAP_CONNECTOR_ENABLED: bool = False
-    SAP_CONNECTOR_TYPE: str = "stub"
+    SAP_CONNECTOR_TYPE: str = "stub"  # "stub" or "adt"
     SAP_SYSTEM_ID: str = "DEV"
     SAP_CLIENT: str = "100"
     SAP_S4HANA_RELEASE: str = "2023"
     SAP_S4CORE_RELEASE: str = "108 SP03"
     SAP_BASIS_RELEASE: str = "758 SP03"
+
+    # SAP ADT Network & Auth Settings
+    SAP_BASE_URL: str = Field(
+        default="",
+        description="Base URL of SAP host e.g. https://s4dev.company.corp:44300",
+    )
+    SAP_AUTH_TYPE: str = Field(
+        default="basic",
+        description="Authentication mechanism: 'basic' or 'token'",
+    )
+    SAP_USERNAME: str = Field(
+        default="",
+        description="SAP username with ADT display authorizations",
+    )
+    SAP_PASSWORD: SecretStr = Field(
+        default=SecretStr(""),
+        description="SAP user password, masked to avoid accidental disclosure",
+    )
+    SAP_API_TOKEN: SecretStr = Field(
+        default=SecretStr(""),
+        description="Optional API bearer token if token-based auth is configured",
+    )
+    SAP_VERIFY_SSL: bool = Field(
+        default=True,
+        description="Whether to enforce SSL/TLS certificate validation",
+    )
+    SAP_REQUEST_TIMEOUT_SECONDS: int = Field(
+        default=15,
+        description="HTTP request timeout in seconds for SAP ADT calls",
+    )
 
     # Agent Orchestration Settings
     AGENT_MAX_ITERATIONS: int = 10

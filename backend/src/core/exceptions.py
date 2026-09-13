@@ -79,6 +79,66 @@ class SAPAuthorizationError(SAPConnectorError):
         )
 
 
+class SAPConfigurationError(SAPConnectorError):
+    """Raised when required SAP connection settings are missing or malformed."""
+
+    def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="SAP_CONFIG_ERROR",
+            status_code=500,
+            details=details,
+        )
+
+
+class SAPAuthenticationError(SAPConnectorError):
+    """Raised when SAP HTTP authentication fails (HTTP 401)."""
+
+    def __init__(self, message: str = "SAP ADT authentication failed. Check credentials and client configuration."):
+        super().__init__(
+            message=message,
+            code="SAP_AUTH_FAILED",
+            status_code=401,
+            details={"status": 401},
+        )
+
+
+class SAPPermissionError(SAPConnectorError):
+    """Raised when SAP user lacks authorization for the requested ADT resource (HTTP 403)."""
+
+    def __init__(self, resource: str = ""):
+        super().__init__(
+            message=f"Access forbidden to SAP ADT resource '{resource}'. Check authorization profile S_ADT_RES.",
+            code="SAP_PERMISSION_DENIED",
+            status_code=403,
+            details={"resource": resource, "status": 403},
+        )
+
+
+class SAPNotFoundError(SAPConnectorError):
+    """Raised when a requested CDS definition or ADT resource does not exist in the SAP system (HTTP 404)."""
+
+    def __init__(self, resource_name: str):
+        super().__init__(
+            message=f"SAP CDS resource '{resource_name}' was not found in the target system.",
+            code="SAP_RESOURCE_NOT_FOUND",
+            status_code=404,
+            details={"resource": resource_name, "status": 404},
+        )
+
+
+class SAPConnectionError(SAPConnectorError):
+    """Raised when connection to SAP host fails or times out."""
+
+    def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="SAP_CONNECTION_ERROR",
+            status_code=502,
+            details=details,
+        )
+
+
 class GovernanceApprovalRequiredError(PlatformBaseException):
     """Raised when an operation (such as CDS draft creation or activation) requires explicit human sign-off."""
 

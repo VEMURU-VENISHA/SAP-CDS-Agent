@@ -15,11 +15,19 @@ from src.sap.models import (
     FieldDefinition,
     SAPSystemInfo,
 )
-from src.sap.connector import UnconnectedSAPConnector
+from src.sap.connector import (
+    UnconnectedSAPConnector,
+    get_sap_connector,
+    reset_sap_connector,
+)
+from src.sap.adt_connector import SAPADTConnector
 
 __all__ = [
     "ISAPConnector",
     "UnconnectedSAPConnector",
+    "SAPADTConnector",
+    "get_sap_connector",
+    "reset_sap_connector",
     "SAPSystemInfo",
     "CDSMetadata",
     "FieldDefinition",
@@ -27,3 +35,4 @@ __all__ = [
     "DraftResult",
     "ActivationResult",
 ]
+
