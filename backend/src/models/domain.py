@@ -251,3 +251,82 @@ class DeploymentRequest(BaseModel):
     status: DeploymentStatus = Field(default=DeploymentStatus.PENDING_APPROVAL)
     created_at: datetime = Field(default_factory=utc_now)
     audit_trail_id: Optional[str] = Field(default=None, description="Audit ledger reference")
+
+
+class DraftElementType(str, Enum):
+    SOURCE_VIEW = "SOURCE_VIEW"
+    FIELD = "FIELD"
+    ASSOCIATION = "ASSOCIATION"
+    PARAMETER = "PARAMETER"
+    ANNOTATION = "ANNOTATION"
+    FILTER = "FILTER"
+
+
+class ElementEvidenceRecord(BaseModel):
+    """Ground-truth evidence justifying why a specific CDS element is present in the draft."""
+
+    element_name: str = Field(..., description="CDS element or field name")
+    element_type: DraftElementType = Field(default=DraftElementType.FIELD, description="Element classification")
+    source_entity: Optional[str] = Field(default=None, description="Originating CDS view entity")
+    relationship: Optional[str] = Field(default=None, description="Association alias or join path if transitive")
+    evidence_level: EvidenceLevel = Field(default=EvidenceLevel.LEVEL_6_MISSING, description="Evidence hierarchy level (L1-L6)")
+    evidence_detail: str = Field(default="", description="Detailed human-readable evidence justification")
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="Confidence rating")
+    is_verified: bool = Field(default=False, description="True only for verified levels (L1-L4)")
+
+
+class DraftFieldElement(BaseModel):
+    """Field projection element within a CDS draft."""
+
+    field_name: str = Field(..., description="Output field name or alias")
+    alias: Optional[str] = Field(default=None, description="Field alias if renamed")
+    source_expression: str = Field(..., description="SELECT expression (e.g. SalesOrder, _Item.Material)")
+    source_entity: str = Field(..., description="Originating CDS view entity")
+    data_type: Optional[str] = Field(default=None, description="ABAP dictionary type if known")
+    is_key: bool = Field(default=False, description="True if primary key component")
+    evidence: ElementEvidenceRecord = Field(..., description="Ground-truth evidence binding")
+
+
+class DraftAssociationElement(BaseModel):
+    """Association definition within a CDS draft."""
+
+    association_name: str = Field(..., description="Association alias (e.g. _Item)")
+    target_entity: str = Field(..., description="Target CDS view entity")
+    cardinality: str = Field(default="[0..*]", description="Cardinality expression")
+    on_condition: str = Field(..., description="ON clause expression")
+    is_verified: bool = Field(default=True, description="True if target DDL was verified via ADT")
+    evidence: ElementEvidenceRecord = Field(..., description="Ground-truth evidence binding")
+
+
+class DraftParameterElement(BaseModel):
+    """Input parameter definition within a CDS draft."""
+
+    parameter_name: str = Field(..., description="Parameter name (e.g. P_DisplayCurrency)")
+    data_type: str = Field(..., description="ABAP type (e.g. abap.cuky)")
+    default_value: Optional[str] = Field(default=None, description="Default parameter value if defined")
+    evidence: ElementEvidenceRecord = Field(..., description="Ground-truth evidence binding")
+
+
+class CDSDraft(BaseModel):
+    """Complete, evidence-grounded CDS design proposal and synthesized draft artifact."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    requirement_id: str = Field(..., description="Associated BusinessRequirement ID")
+    decision_action: DecisionAction = Field(..., description="Decision from Milestone 5 (REUSE, EXTEND, CREATE, INSUFFICIENT_EVIDENCE)")
+    object_name: str = Field(..., description="Target CDS view or extension name")
+    object_type: str = Field(default="VIEW_ENTITY", description="REUSE_PROPOSAL, VIEW_ENTITY_EXTENSION, CUSTOM_VIEW_ENTITY, COMPOSITION_PROPOSAL")
+    proposed_layer: CDSLayer = Field(default=CDSLayer.BASIC, description="Proposed VDM layer")
+    source_views: List[str] = Field(default_factory=list, description="Verified source CDS view entities")
+    fields: List[DraftFieldElement] = Field(default_factory=list, description="Projected fields with evidence")
+    associations: List[DraftAssociationElement] = Field(default_factory=list, description="Defined associations")
+    parameters: List[DraftParameterElement] = Field(default_factory=list, description="Defined parameters")
+    filters: List[str] = Field(default_factory=list, description="Where conditions / filter expressions")
+    annotations: Dict[str, Any] = Field(default_factory=dict, description="Header and element annotations")
+    ddl_source: str = Field(..., description="Synthesized ABAP CDS DDL code or consumption proposal")
+    evidence_per_element: List[ElementEvidenceRecord] = Field(default_factory=list, description="Itemized evidence for all elements")
+    warnings: List[str] = Field(default_factory=list, description="Design warnings, unsupported assumptions, or evidence gaps")
+    validation_errors: List[str] = Field(default_factory=list, description="Static validation errors")
+    generation_status: str = Field(default="GENERATED", description="GENERATED, VALIDATED, INSUFFICIENT_EVIDENCE, REJECTED")
+    unresolved_items: List[str] = Field(default_factory=list, description="Requested concepts that could not be verified")
+    created_at: datetime = Field(default_factory=utc_now)
+

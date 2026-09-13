@@ -5,12 +5,13 @@ import { MetricCards } from './components/dashboard/MetricCards';
 import { RecentPipelines } from './components/dashboard/RecentPipelines';
 import { StudioPreview } from './components/dashboard/StudioPreview';
 import { fetchHealth } from './services/api';
-import { HealthStatus, PipelineResult } from './types';
+import { HealthStatus, PipelineResult, CDSDraft } from './types';
 
 export function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [latestDraft, setLatestDraft] = useState<CDSDraft | null>(null);
 
   // Dynamic session metrics tracking actual user executions only
   const [metrics, setMetrics] = useState({
@@ -43,6 +44,9 @@ export function App() {
   }, []);
 
   const handlePipelineExecuted = (result: PipelineResult) => {
+    if (result.cds_draft) {
+      setLatestDraft(result.cds_draft);
+    }
     setMetrics((prev) => ({
       totalPipelines: prev.totalPipelines + 1,
       reuseCount: prev.reuseCount + (result.decision.action === 'REUSE' ? 1 : 0),
@@ -79,7 +83,7 @@ export function App() {
           />
 
           {/* Data Model Visualization & Monaco CDS Preview */}
-          <StudioPreview />
+          <StudioPreview cdsDraft={latestDraft} />
         </main>
       </div>
     </div>

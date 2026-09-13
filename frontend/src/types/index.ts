@@ -113,12 +113,80 @@ export interface Decision {
   approved_by?: string;
 }
 
+export type DraftElementType =
+  | 'SOURCE_VIEW'
+  | 'FIELD'
+  | 'ASSOCIATION'
+  | 'PARAMETER'
+  | 'ANNOTATION'
+  | 'FILTER';
+
+export interface ElementEvidenceRecord {
+  element_name: string;
+  element_type: DraftElementType;
+  source_entity?: string;
+  relationship?: string;
+  evidence_level: EvidenceLevel;
+  evidence_detail: string;
+  confidence: number;
+  is_verified: boolean;
+}
+
+export interface DraftFieldElement {
+  field_name: string;
+  alias?: string;
+  source_expression: string;
+  source_entity: string;
+  data_type?: string;
+  is_key: boolean;
+  evidence: ElementEvidenceRecord;
+}
+
+export interface DraftAssociationElement {
+  association_name: string;
+  target_entity: string;
+  cardinality: string;
+  on_condition: string;
+  is_verified: boolean;
+  evidence: ElementEvidenceRecord;
+}
+
+export interface DraftParameterElement {
+  parameter_name: string;
+  data_type: string;
+  default_value?: string;
+  evidence: ElementEvidenceRecord;
+}
+
+export interface CDSDraft {
+  id: string;
+  requirement_id: string;
+  decision_action: DecisionAction;
+  object_name: string;
+  object_type: string;
+  proposed_layer: 'BASIC' | 'COMPOSITE' | 'CONSUMPTION';
+  source_views: string[];
+  fields: DraftFieldElement[];
+  associations: DraftAssociationElement[];
+  parameters: DraftParameterElement[];
+  filters: string[];
+  annotations: Record<string, any>;
+  ddl_source: string;
+  evidence_per_element: ElementEvidenceRecord[];
+  warnings: string[];
+  validation_errors: string[];
+  generation_status: string;
+  unresolved_items: string[];
+  created_at: string;
+}
+
 export interface PipelineResult {
   requirement: BusinessRequirement;
   structured_requirement?: StructuredRequirement;
   evaluated_candidates?: CandidateEvaluation[];
   decision: Decision;
   generated_code_preview: string;
+  cds_draft?: CDSDraft;
   current_step: string;
   audit_events_count: number;
 }

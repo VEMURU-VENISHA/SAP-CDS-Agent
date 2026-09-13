@@ -8,6 +8,7 @@ from src.agents.state import CDSWorkflowState
 from src.models.domain import (
     BusinessRequirement,
     CandidateEvaluation,
+    CDSDraft,
     Decision,
     StructuredRequirement,
     TargetUseCase,
@@ -32,6 +33,7 @@ class PipelineExecutionResponse(BaseModel):
     structured_requirement: Optional[StructuredRequirement] = None
     evaluated_candidates: List[CandidateEvaluation] = []
     decision: Decision
+    cds_draft: Optional[CDSDraft] = None
     generated_code_preview: str = ""
     current_step: str
     audit_events_count: int
@@ -79,6 +81,7 @@ async def analyze_requirement(payload: RequirementCreatePayload):
         structured_requirement=final_state.get("structured_requirement"),
         evaluated_candidates=final_state.get("evaluated_candidates", []),
         decision=decision,
+        cds_draft=final_state.get("cds_draft"),
         generated_code_preview=final_state.get("generated_cds_code") or "",
         current_step=final_state.get("current_step", "COMPLETED"),
         audit_events_count=len(final_state.get("audit_logs", [])),

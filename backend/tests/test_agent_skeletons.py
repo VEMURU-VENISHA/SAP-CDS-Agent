@@ -66,6 +66,7 @@ async def test_full_pipeline_orchestration():
     assert final_state["decision"].requirement_id == req.id
     assert final_state.get("data_model") is not None
     assert final_state.get("generated_cds_code") is not None
+    assert final_state.get("cds_draft") is not None
     assert final_state.get("validation_result") is not None
     assert final_state.get("deployment_request") is not None
 

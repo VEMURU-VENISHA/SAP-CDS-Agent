@@ -6,6 +6,7 @@ from src.models.domain import (
     BusinessRequirement,
     CandidateEvaluation,
     CDSCandidate,
+    CDSDraft,
     DataModel,
     Decision,
     DeploymentRequest,
@@ -32,6 +33,7 @@ class CDSWorkflowState(TypedDict, total=False):
 
     # 4. Modeling & Generation Stage (EXTEND or CREATE)
     data_model: Optional[DataModel]
+    cds_draft: Optional[CDSDraft]
     generated_cds_code: Optional[str]
 
     # 5. Validation Stage
