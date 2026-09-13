@@ -276,3 +276,15 @@ class SAPADTConnector(ISAPConnector):
             code="SAP_READ_ONLY_MODE",
             status_code=403,
         )
+
+    async def aclose(self) -> None:
+        """Closes the underlying ADT client session to prevent resource leaks."""
+        if hasattr(self.client, "aclose"):
+            await self.client.aclose()
+
+    async def __aenter__(self) -> "SAPADTConnector":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.aclose()
+

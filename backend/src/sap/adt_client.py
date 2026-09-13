@@ -32,6 +32,8 @@ class SAPADTClient:
     def __init__(self, settings: Optional[Settings] = None, client: Optional[httpx.AsyncClient] = None):
         self.settings = settings or get_settings()
         self._custom_client = client
+        self._session: Optional[httpx.AsyncClient] = None
+        self._csrf_token: Optional[str] = None
 
     def _validate_config(self) -> None:
         """Ensures required network and credential settings are present."""
@@ -167,22 +169,102 @@ class SAPADTClient:
             )
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Creates or returns an active httpx client with configured SSL, redirect, and timeout settings."""
+        """Creates or returns an active persistent httpx client with configured SSL, redirect, and timeout settings.
+
+        Reusing the same client ensures SAP session cookies (e.g. SAP_SESSIONID_*, sap-usercontext)
+        are preserved between the CSRF-fetch GET and the checkrun POST.
+        """
         if self._custom_client is not None:
             return self._custom_client
 
-        base_url = self.settings.SAP_BASE_URL.rstrip("/")
-        verify_ssl: Union[bool, str] = self.settings.SAP_VERIFY_SSL
-        if self.settings.SAP_CA_BUNDLE_PATH and self.settings.SAP_CA_BUNDLE_PATH.strip():
-            verify_ssl = self.settings.SAP_CA_BUNDLE_PATH.strip()
+        if self._session is None or self._session.is_closed:
+            base_url = self.settings.SAP_BASE_URL.rstrip("/")
+            verify_ssl: Union[bool, str] = self.settings.SAP_VERIFY_SSL
+            if self.settings.SAP_CA_BUNDLE_PATH and self.settings.SAP_CA_BUNDLE_PATH.strip():
+                verify_ssl = self.settings.SAP_CA_BUNDLE_PATH.strip()
 
-        return httpx.AsyncClient(
-            base_url=base_url,
-            verify=verify_ssl,
-            follow_redirects=False,
-            timeout=float(self.settings.SAP_REQUEST_TIMEOUT_SECONDS),
-            auth=self._get_auth_tuple(),
+            self._session = httpx.AsyncClient(
+                base_url=base_url,
+                verify=verify_ssl,
+                follow_redirects=False,
+                timeout=float(self.settings.SAP_REQUEST_TIMEOUT_SECONDS),
+                auth=self._get_auth_tuple(),
+            )
+
+        return self._session
+
+    async def aclose(self) -> None:
+        """Closes the underlying persistent HTTP session to avoid connection leaks."""
+        if self._session is not None and not self._session.is_closed:
+            await self._session.aclose()
+            self._session = None
+        self._csrf_token = None
+
+    async def __aenter__(self) -> "SAPADTClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.aclose()
+
+    async def fetch_csrf_token(self, force_refresh: bool = False) -> str:
+        """Negotiates/refreshes an SAP CSRF token using the verified read-only GET endpoint.
+
+        Endpoint: GET /sap/bc/adt/repository/informationsystem/search
+        Header: X-CSRF-Token: Fetch
+
+        Verified in our SAP system:
+        - Read-only GET request passed through the zero-write security guard.
+        - Preserves SAP session cookies in the shared httpx.AsyncClient session.
+        - Extracts and caches the returned 'x-csrf-token' header value.
+        """
+        if self._csrf_token and not force_refresh:
+            return self._csrf_token
+
+        try:
+            self._validate_config()
+        except SAPConfigurationError:
+            return ""
+
+        path = "/sap/bc/adt/repository/informationsystem/search"
+        params: Dict[str, Any] = {
+            "operation": "quickSearch",
+            "query": "I_SalesOrder",
+            "maxResults": "1",
+        }
+        if self.settings.SAP_SEND_CLIENT_PARAM and self.settings.SAP_CLIENT:
+            params["sap-client"] = self.settings.SAP_CLIENT
+
+        # Pre-socket zero-write security check (verified GET allowlist)
+        try:
+            self._assert_zero_write_policy("GET", path, params)
+        except SAPSecurityError as e:
+            logger.warning("CSRF token negotiation blocked by security guard: %s", e)
+            return ""
+
+        headers = self._get_auth_headers()
+        headers["X-CSRF-Token"] = "Fetch"
+        headers["Accept"] = (
+            "application/xml, text/xml, application/vnd.sap.adt.repository.informationsystem.search.v1+xml, */*"
         )
+
+        self._log_request("GET", path)
+
+        try:
+            client = await self._get_client()
+            resp = await client.get(path, params=params, headers=headers)
+            self._log_request("GET", path, resp.status_code)
+
+            token = resp.headers.get("x-csrf-token")
+            if token and token.strip().lower() != "required":
+                self._csrf_token = token.strip()
+                logger.debug("Successfully negotiated SAP CSRF token.")
+                return self._csrf_token
+            else:
+                logger.debug("SAP GET response did not return an x-csrf-token.")
+        except Exception as e:
+            logger.warning("CSRF token negotiation encountered error: %s", e)
+
+        return ""
 
     async def get_ddl_source(self, object_name: str) -> str:
         """Retrieves raw ABAP CDS DDL source code for a known CDS view entity.
@@ -205,11 +287,7 @@ class SAPADTClient:
 
         try:
             client = await self._get_client()
-            if self._custom_client is not None:
-                resp = await client.get(path, params=params, headers=headers)
-            else:
-                async with client as http:
-                    resp = await http.get(path, params=params, headers=headers)
+            resp = await client.get(path, params=params, headers=headers)
 
             self._log_request("GET", path, resp.status_code)
 
@@ -279,11 +357,7 @@ class SAPADTClient:
 
         try:
             client = await self._get_client()
-            if self._custom_client is not None:
-                resp = await client.get(path, params=params, headers=headers)
-            else:
-                async with client as http:
-                    resp = await http.get(path, params=params, headers=headers)
+            resp = await client.get(path, params=params, headers=headers)
 
             self._log_request("GET", path, resp.status_code)
             if resp.status_code in (200, 304):
@@ -385,11 +459,7 @@ class SAPADTClient:
 
         try:
             client = await self._get_client()
-            if self._custom_client is not None:
-                resp = await client.get(path, params=params, headers=headers)
-            else:
-                async with client as http:
-                    resp = await http.get(path, params=params, headers=headers)
+            resp = await client.get(path, params=params, headers=headers)
 
             self._log_request("GET", path, resp.status_code)
 
@@ -584,6 +654,7 @@ class SAPADTClient:
         self,
         repository_uri: str,
         version: str = "active",
+        _is_retry: bool = False,
     ) -> SAPCheckrunResult:
         """Executes a real read-only SAP ADT checkrun against a repository object URI.
 
@@ -630,20 +701,21 @@ class SAPADTClient:
                 reason=f"Security guard blocked execution: {e}",
             )
 
+        # Negotiate CSRF token via verified read-only GET before dispatching checkrun POST
+        csrf_token = await self.fetch_csrf_token(force_refresh=False)
+
         body = self._build_checkrun_xml(repository_uri, version=version)
         headers = self._get_auth_headers()
         headers["Content-Type"] = "application/vnd.sap.adt.checkobjects+xml"
         headers["Accept"] = "application/vnd.sap.adt.checkmessages+xml"
+        if csrf_token:
+            headers["X-CSRF-Token"] = csrf_token
 
         self._log_request("POST", path)
 
         try:
             client = await self._get_client()
-            if self._custom_client is not None:
-                resp = await client.post(path, params=params, headers=headers, content=body)
-            else:
-                async with client as http:
-                    resp = await http.post(path, params=params, headers=headers, content=body)
+            resp = await client.post(path, params=params, headers=headers, content=body)
 
             self._log_request("POST", path, resp.status_code)
 
@@ -662,11 +734,21 @@ class SAPADTClient:
                     reason="SAP ADT checkrun failed: 401 Unauthorized. Verify credentials.",
                 )
             if resp.status_code == 403:
+                # Check if CSRF token was required/expired and retry once
+                is_csrf_err = (
+                    resp.headers.get("x-csrf-token", "").lower() == "required"
+                    or "csrf" in resp.text.lower()
+                )
+                if is_csrf_err and not _is_retry:
+                    logger.info("SAP checkrun returned 403 (CSRF token required). Refreshing token and retrying once...")
+                    await self.fetch_csrf_token(force_refresh=True)
+                    return await self.run_checkrun(repository_uri, version=version, _is_retry=True)
+
                 logger.warning("SAP ADT checkrun failed: 403 Forbidden")
                 return SAPCheckrunResult(
                     status=SAPValidationStatus.UNAVAILABLE,
                     http_status=403,
-                    reason="SAP ADT checkrun failed: 403 Forbidden. User lacks authorization.",
+                    reason="SAP ADT checkrun failed: 403 Forbidden. User lacks authorization or CSRF token rejected.",
                 )
             if resp.status_code == 404:
                 logger.warning("SAP ADT checkrun returned 404 Not Found")

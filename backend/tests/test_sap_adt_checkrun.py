@@ -49,15 +49,16 @@ def test_checkrun_xml_generation():
     assert 'chkrun:version="active"' in xml
 
 
-# 2. Correct POST path, Content-Type, and Accept header
+# 2. Correct POST path, Content-Type, Accept, and CSRF token headers
 @pytest.mark.asyncio
 async def test_checkrun_post_path_and_headers():
     settings = get_mock_settings()
-    captured_request = None
+    captured_requests = []
 
     def handler(request: httpx.Request):
-        nonlocal captured_request
-        captured_request = request
+        captured_requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, headers={"x-csrf-token": "MOCK_CSRF_TOKEN_42"})
         return httpx.Response(
             200,
             text="""<?xml version="1.0" encoding="UTF-8"?>
@@ -72,12 +73,14 @@ async def test_checkrun_post_path_and_headers():
 
     result = await adt_client.run_checkrun("/sap/bc/adt/ddic/ddl/sources/i_salesorder")
 
-    assert captured_request is not None
-    assert captured_request.method == "POST"
-    assert captured_request.url.path == "/sap/bc/adt/checkruns"
-    assert captured_request.url.query.decode("utf-8") == "reporters=abapCheckRun"
-    assert captured_request.headers["Content-Type"] == "application/vnd.sap.adt.checkobjects+xml"
-    assert captured_request.headers["Accept"] == "application/vnd.sap.adt.checkmessages+xml"
+    post_reqs = [r for r in captured_requests if r.method == "POST"]
+    assert len(post_reqs) == 1
+    post_req = post_reqs[0]
+    assert post_req.url.path == "/sap/bc/adt/checkruns"
+    assert post_req.url.query.decode("utf-8") == "reporters=abapCheckRun"
+    assert post_req.headers["Content-Type"] == "application/vnd.sap.adt.checkobjects+xml"
+    assert post_req.headers["Accept"] == "application/vnd.sap.adt.checkmessages+xml"
+    assert post_req.headers["X-CSRF-Token"] == "MOCK_CSRF_TOKEN_42"
     assert result.status == SAPValidationStatus.PASS
 
 
@@ -407,10 +410,13 @@ async def test_captured_real_sap_trace_connector_and_validation_agent():
 </chkrun:checkRunReports>"""
 
     def handler(request: httpx.Request):
+        if request.method == "GET":
+            return httpx.Response(200, headers={"x-csrf-token": "TRACE_CSRF_TOKEN"})
         assert request.method == "POST"
         assert request.url.path == "/sap/bc/adt/checkruns"
         assert request.url.query.decode("utf-8") == "reporters=abapCheckRun"
         assert request.headers["Content-Type"] == "application/vnd.sap.adt.checkobjects+xml"
+        assert request.headers.get("X-CSRF-Token") == "TRACE_CSRF_TOKEN"
         return httpx.Response(
             200,
             text=real_sap_response_xml,
@@ -461,4 +467,182 @@ async def test_unpersisted_drafts_guaranteed_unavailable_no_network():
     assert network_called is False
     assert val_res.sap_validation_status == SAPValidationStatus.UNAVAILABLE
     assert "Unpersisted Draft" in (val_res.sap_checkrun_reason or "")
+
+
+# 19. CSRF token fetch negotiation and caching
+@pytest.mark.asyncio
+async def test_csrf_token_fetch_and_extraction():
+    settings = get_mock_settings()
+    captured_get = None
+
+    def handler(request: httpx.Request):
+        nonlocal captured_get
+        captured_get = request
+        return httpx.Response(
+            200,
+            headers={"x-csrf-token": "FETCHED_TOKEN_XYZ_123"},
+            text="<?xml version=\"1.0\" encoding=\"utf-8\"?><adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\"/>",
+        )
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=settings.SAP_BASE_URL)
+    adt_client = SAPADTClient(settings=settings, client=mock_client)
+
+    token = await adt_client.fetch_csrf_token()
+
+    assert token == "FETCHED_TOKEN_XYZ_123"
+    assert adt_client._csrf_token == "FETCHED_TOKEN_XYZ_123"
+    assert captured_get is not None
+    assert captured_get.method == "GET"
+    assert captured_get.url.path == "/sap/bc/adt/repository/informationsystem/search"
+    assert captured_get.headers["X-CSRF-Token"] == "Fetch"
+
+
+# 20. Cookie preservation between CSRF GET and checkrun POST
+@pytest.mark.asyncio
+async def test_csrf_cookie_preservation():
+    settings = get_mock_settings()
+    session_cookies_seen_on_post = []
+
+    def handler(request: httpx.Request):
+        if request.method == "GET":
+            resp = httpx.Response(200, headers={"x-csrf-token": "COOKIE_TEST_TOKEN"})
+            resp.headers["Set-Cookie"] = "SAP_SESSIONID_S3X_100=session_val_abc; path=/"
+            return resp
+        elif request.method == "POST":
+            # Inspect cookie header sent by client on subsequent POST
+            cookie_hdr = request.headers.get("Cookie", "")
+            session_cookies_seen_on_post.append(cookie_hdr)
+            return httpx.Response(
+                200,
+                text="""<?xml version="1.0" encoding="UTF-8"?>
+<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun">
+  <chkrun:checkReport chkrun:reporter="abapCheckRun" chkrun:triggeringuri="/sap/bc/adt/ddic/ddl/sources/i_salesorder" chkrun:status="processed" />
+</chkrun:checkRunReports>""",
+                headers={"Content-Type": "application/vnd.sap.adt.checkmessages+xml; charset=utf-8"},
+            )
+        return httpx.Response(400)
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=settings.SAP_BASE_URL)
+    adt_client = SAPADTClient(settings=settings, client=mock_client)
+
+    result = await adt_client.run_checkrun("/sap/bc/adt/ddic/ddl/sources/i_salesorder")
+
+    assert result.status == SAPValidationStatus.PASS
+    assert len(session_cookies_seen_on_post) == 1
+    assert "SAP_SESSIONID_S3X_100=session_val_abc" in session_cookies_seen_on_post[0]
+
+
+# 21. Checkrun 403 CSRF token required triggers refresh and succeeds on retry
+@pytest.mark.asyncio
+async def test_checkrun_403_csrf_refresh_and_retry_once():
+    settings = get_mock_settings()
+    call_count = 0
+
+    def handler(request: httpx.Request):
+        nonlocal call_count
+        call_count += 1
+        if request.method == "GET":
+            # Token fetch endpoint
+            token_val = f"FRESH_TOKEN_{call_count}"
+            return httpx.Response(200, headers={"x-csrf-token": token_val})
+        elif request.method == "POST":
+            # First POST fails with CSRF Required; second POST succeeds
+            if call_count <= 2:
+                return httpx.Response(
+                    403,
+                    headers={"x-csrf-token": "Required"},
+                    text="CSRF token validation failed",
+                )
+            else:
+                return httpx.Response(
+                    200,
+                    text="""<?xml version="1.0" encoding="UTF-8"?>
+<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun">
+  <chkrun:checkReport chkrun:reporter="abapCheckRun" chkrun:triggeringuri="/sap/bc/adt/ddic/ddl/sources/i_salesorder" chkrun:status="processed" />
+</chkrun:checkRunReports>""",
+                    headers={"Content-Type": "application/vnd.sap.adt.checkmessages+xml; charset=utf-8"},
+                )
+        return httpx.Response(400)
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=settings.SAP_BASE_URL)
+    adt_client = SAPADTClient(settings=settings, client=mock_client)
+
+    result = await adt_client.run_checkrun("/sap/bc/adt/ddic/ddl/sources/i_salesorder")
+
+    # Call sequence: 1. GET (initial fetch) -> 2. POST (403 required) -> 3. GET (refresh) -> 4. POST (200 OK)
+    assert result.status == SAPValidationStatus.PASS
+    assert call_count == 4
+
+
+# 22. Checkrun 403 fails cleanly after exactly one retry (no infinite loop)
+@pytest.mark.asyncio
+async def test_checkrun_403_csrf_refresh_fails_after_one_retry():
+    settings = get_mock_settings()
+    post_count = 0
+
+    def handler(request: httpx.Request):
+        nonlocal post_count
+        if request.method == "GET":
+            return httpx.Response(200, headers={"x-csrf-token": "STILL_INVALID_TOKEN"})
+        elif request.method == "POST":
+            post_count += 1
+            return httpx.Response(
+                403,
+                headers={"x-csrf-token": "Required"},
+                text="CSRF token validation failed",
+            )
+        return httpx.Response(400)
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=settings.SAP_BASE_URL)
+    adt_client = SAPADTClient(settings=settings, client=mock_client)
+
+    result = await adt_client.run_checkrun("/sap/bc/adt/ddic/ddl/sources/i_salesorder")
+
+    # Exactly 2 POST attempts (initial + 1 retry)
+    assert post_count == 2
+    assert result.status == SAPValidationStatus.UNAVAILABLE
+    assert result.http_status == 403
+
+
+# 23. Client session cleanup with aclose
+@pytest.mark.asyncio
+async def test_client_session_cleanup_aclose():
+    settings = get_mock_settings()
+    adt_client = SAPADTClient(settings=settings)
+    adt_client._csrf_token = "SOME_CACHED_TOKEN"
+
+    # Simulate active session
+    fake_session = httpx.AsyncClient()
+    adt_client._session = fake_session
+    assert not fake_session.is_closed
+
+    await adt_client.aclose()
+
+    assert fake_session.is_closed
+    assert adt_client._session is None
+    assert adt_client._csrf_token is None
+
+
+# 24. Zero-write security policy blocks unauthorized operations unchanged
+def test_zero_write_policy_remains_strictly_enforced():
+    from src.core.exceptions import SAPSecurityError
+
+    settings = get_mock_settings()
+    adt_client = SAPADTClient(settings=settings)
+
+    # 1. Modifying methods unconditionally blocked
+    for verb in ("PUT", "DELETE", "PATCH"):
+        with pytest.raises(SAPSecurityError):
+            adt_client.assert_zero_write_policy(verb, "/sap/bc/adt/checkruns")
+
+    # 2. Arbitrary POST blocked
+    with pytest.raises(SAPSecurityError):
+        adt_client.assert_zero_write_policy("POST", "/sap/bc/adt/ddic/ddl/sources")
+
+    with pytest.raises(SAPSecurityError):
+        adt_client.assert_zero_write_policy("POST", "/sap/bc/adt/discovery")
+
+    # 3. Only verified checkrun POST allowed
+    adt_client.assert_zero_write_policy("POST", "/sap/bc/adt/checkruns", {"reporters": "abapCheckRun"})
+
 

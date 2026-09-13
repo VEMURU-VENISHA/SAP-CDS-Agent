@@ -1,4 +1,4 @@
-﻿"""Unit Tests for Milestone 8 Security Controls & Zero-Write Policy."""
+"""Unit Tests for Milestone 8 Security Controls & Zero-Write Policy."""
 
 import pytest
 from pydantic import SecretStr
@@ -137,7 +137,8 @@ async def test_follow_redirects_disabled_on_client():
 
 # 7. TLS verification: secure default is True
 def test_tls_verification_defaults_to_true():
-    settings = Settings()
+    # Isolate from local developer .env file to verify application's built-in defaults
+    settings = Settings(_env_file=None)
     assert settings.SAP_VERIFY_SSL is True
     assert settings.SAP_LIVE_READ_ONLY is False
     assert settings.SAP_LIVE_TEST_ENABLED is False
