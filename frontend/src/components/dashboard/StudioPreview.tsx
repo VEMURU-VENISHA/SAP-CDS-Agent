@@ -433,6 +433,29 @@ export const StudioPreview: React.FC<StudioPreviewProps> = ({ cdsDraft, validati
                   </div>
                 )}
 
+                {/* ADT Checkrun Response Metadata */}
+                {validationResult?.sap_checkrun_result &&
+                  (validationResult.sap_checkrun_result.triggering_uri ||
+                    validationResult.sap_checkrun_result.check_report_status) && (
+                    <div className="flex flex-wrap items-center gap-3 text-[11px] text-gray-400 bg-gray-900/60 px-3 py-1.5 rounded border border-gray-800">
+                      {validationResult.sap_checkrun_result.reporter && (
+                        <div>
+                          Reporter: <span className="text-gray-200 font-mono">{validationResult.sap_checkrun_result.reporter}</span>
+                        </div>
+                      )}
+                      {validationResult.sap_checkrun_result.check_report_status && (
+                        <div>
+                          Report Status: <span className="text-gray-200 font-mono">{validationResult.sap_checkrun_result.check_report_status}</span>
+                        </div>
+                      )}
+                      {validationResult.sap_checkrun_result.triggering_uri && (
+                        <div>
+                          Target URI: <span className="text-gray-200 font-mono">{validationResult.sap_checkrun_result.triggering_uri}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                 {/* Messages table if present */}
                 {validationResult?.sap_checkrun_result?.messages &&
                   validationResult.sap_checkrun_result.messages.length > 0 && (

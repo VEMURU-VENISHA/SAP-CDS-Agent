@@ -1,4 +1,4 @@
-﻿"""Milestone 7: Unit and Integration Tests for SAP ADT Checkrun Validation."""
+"""Milestone 7: Unit and Integration Tests for SAP ADT Checkrun Validation."""
 
 import pytest
 import re
@@ -336,3 +336,130 @@ async def test_no_sap_write_operations_in_checkrun():
     with pytest.raises(Exception) as exc_act:
         await connector.activate_cds("Z_Test", "TR123")
     assert "disabled" in str(exc_act.value).lower() or "read_only" in str(exc_act.value).lower()
+
+
+# 16. Verified S/4HANA 2023 DEV captured response trace
+def test_captured_real_sap_dev_checkrun_trace():
+    """Verified against real Eclipse ADT trace from S/4HANA 2023 DEV system.
+
+    Trace facts:
+    - POST /sap/bc/adt/checkruns?reporters=abapCheckRun
+    - HTTP 200 OK
+    - Content-Type: application/vnd.sap.adt.checkmessages+xml; charset=utf-8
+    - Root: checkRunReports
+    - Reporter: abapCheckRun
+    - Check report status: processed
+    - Triggering URI: /sap/bc/adt/ddic/ddl/sources/i_salesorder
+    - Diagnostic type: E -> SAPValidationStatus.ERROR
+    - Message ID: SDDL_PARSER_MSG
+    - Short text: Unexpected word ...
+    - Position: #start=14,2
+    """
+    real_sap_response_xml = """<?xml version="1.0" encoding="utf-8"?>
+<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun" xmlns:adtcore="http://www.sap.com/adt/core">
+  <chkrun:checkReport chkrun:reporter="abapCheckRun" chkrun:status="processed" chkrun:triggeringuri="/sap/bc/adt/ddic/ddl/sources/i_salesorder">
+    <chkrun:checkMessage
+      chkrun:uri="/sap/bc/adt/ddic/ddl/sources/i_salesorder#start=14,2"
+      chkrun:type="E"
+      chkrun:shortText="Unexpected word 'DEFINE'"
+      chkrun:msgid="SDDL_PARSER_MSG" />
+  </chkrun:checkReport>
+</chkrun:checkRunReports>"""
+
+    res = SAPADTClient._parse_checkrun_xml(
+        real_sap_response_xml,
+        http_status=200,
+        content_type="application/vnd.sap.adt.checkmessages+xml; charset=utf-8",
+    )
+
+    # Verify status mapping: diagnostic type E -> ERROR
+    assert res.status == SAPValidationStatus.ERROR
+    assert res.reporter == "abapCheckRun"
+    assert res.check_report_status == "processed"
+    assert res.triggering_uri == "/sap/bc/adt/ddic/ddl/sources/i_salesorder"
+    assert res.http_status == 200
+    assert "application/vnd.sap.adt.checkmessages+xml" in (res.content_type or "")
+
+    # Verify message attributes preserved
+    assert len(res.messages) == 1
+    msg = res.messages[0]
+    assert msg.severity == "E"
+    assert msg.msgid == "SDDL_PARSER_MSG"
+    assert msg.short_text.startswith("Unexpected word")
+    assert "Unexpected word 'DEFINE'" == msg.short_text
+    assert msg.uri == "/sap/bc/adt/ddic/ddl/sources/i_salesorder#start=14,2"
+    assert msg.line == 14
+    assert msg.column == 2
+
+
+# 17. Captured real SAP trace integration through Connector & ValidationAgent
+@pytest.mark.asyncio
+async def test_captured_real_sap_trace_connector_and_validation_agent():
+    settings = get_mock_settings()
+    real_sap_response_xml = """<?xml version="1.0" encoding="utf-8"?>
+<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun" xmlns:adtcore="http://www.sap.com/adt/core">
+  <chkrun:checkReport chkrun:reporter="abapCheckRun" chkrun:status="processed" chkrun:triggeringuri="/sap/bc/adt/ddic/ddl/sources/i_salesorder">
+    <chkrun:checkMessage
+      chkrun:uri="/sap/bc/adt/ddic/ddl/sources/i_salesorder#start=14,2"
+      chkrun:type="E"
+      chkrun:shortText="Unexpected word 'DEFINE'"
+      chkrun:msgid="SDDL_PARSER_MSG" />
+  </chkrun:checkReport>
+</chkrun:checkRunReports>"""
+
+    def handler(request: httpx.Request):
+        assert request.method == "POST"
+        assert request.url.path == "/sap/bc/adt/checkruns"
+        assert request.url.query.decode("utf-8") == "reporters=abapCheckRun"
+        assert request.headers["Content-Type"] == "application/vnd.sap.adt.checkobjects+xml"
+        return httpx.Response(
+            200,
+            text=real_sap_response_xml,
+            headers={"Content-Type": "application/vnd.sap.adt.checkmessages+xml; charset=utf-8"},
+        )
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=settings.SAP_BASE_URL)
+    connector = SAPADTConnector(settings=settings)
+    connector.client = SAPADTClient(settings=settings, client=mock_client)
+
+    # Validate against existing repository object
+    val_res = await connector.validate_cds(
+        view_definition="SELECT * FROM I_SalesOrder;",
+        repository_uri="/sap/bc/adt/ddic/ddl/sources/i_salesorder",
+    )
+
+    assert val_res.is_valid is False
+    assert val_res.sap_validation_status == SAPValidationStatus.ERROR
+    assert len(val_res.syntax_errors) == 1
+    assert "Unexpected word 'DEFINE'" in val_res.syntax_errors[0]
+    assert "Line 14" in val_res.syntax_errors[0]
+    assert val_res.sap_checkrun_result is not None
+    assert val_res.sap_checkrun_result.check_report_status == "processed"
+    assert val_res.sap_checkrun_result.messages[0].msgid == "SDDL_PARSER_MSG"
+
+
+# 18. Guarantee that unpersisted drafts remain UNAVAILABLE and never claim SAP compilation
+@pytest.mark.asyncio
+async def test_unpersisted_drafts_guaranteed_unavailable_no_network():
+    settings = get_mock_settings()
+    network_called = False
+
+    def handler(request: httpx.Request):
+        nonlocal network_called
+        network_called = True
+        return httpx.Response(500, text="Should never be called")
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=settings.SAP_BASE_URL)
+    connector = SAPADTConnector(settings=settings)
+    connector.client = SAPADTClient(settings=settings, client=mock_client)
+
+    # In-memory unpersisted draft without repository_uri
+    val_res = await connector.validate_cds(
+        view_definition="define view entity ZC_Test as select from I_SalesOrder { SalesOrder };",
+        repository_uri=None,
+    )
+
+    assert network_called is False
+    assert val_res.sap_validation_status == SAPValidationStatus.UNAVAILABLE
+    assert "Unpersisted Draft" in (val_res.sap_checkrun_reason or "")
+

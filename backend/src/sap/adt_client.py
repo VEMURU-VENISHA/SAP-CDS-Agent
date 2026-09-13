@@ -386,31 +386,33 @@ class SAPADTClient:
 
         reporter = "abapCheckRun"
         triggering_uri = None
+        check_report_status = None
         messages: List[SAPCheckMessage] = []
 
         for elem in root.iter():
-            tag = _strip_ns(elem.tag)
-            clean_attrs = {_strip_ns(k): v for k, v in elem.attrib.items()}
+            tag = _strip_ns(elem.tag).lower()
+            clean_attrs_lower = {_strip_ns(k).lower(): v for k, v in elem.attrib.items()}
+            raw_attribs = {k: v for k, v in elem.attrib.items()}
 
-            if tag in ("checkReport", "report"):
-                if "reporter" in clean_attrs:
-                    reporter = clean_attrs["reporter"]
-                if "triggeringuri" in clean_attrs:
-                    triggering_uri = clean_attrs["triggeringuri"]
-                elif "triggeringUri" in clean_attrs:
-                    triggering_uri = clean_attrs["triggeringUri"]
+            if tag in ("checkreport", "report"):
+                if "reporter" in clean_attrs_lower:
+                    reporter = clean_attrs_lower["reporter"]
+                if "status" in clean_attrs_lower:
+                    check_report_status = clean_attrs_lower["status"]
+                if "triggeringuri" in clean_attrs_lower:
+                    triggering_uri = clean_attrs_lower["triggeringuri"]
 
-            elif tag in ("checkMessage", "message"):
-                raw_uri = clean_attrs.get("uri")
-                severity = (clean_attrs.get("type") or clean_attrs.get("severity") or "I").upper()
-                short_text = clean_attrs.get("shortText") or clean_attrs.get("text") or ""
-                msgid = clean_attrs.get("msgid")
-                msgno = clean_attrs.get("msgno")
+            elif tag in ("checkmessage", "message"):
+                raw_uri = clean_attrs_lower.get("uri")
+                severity = (clean_attrs_lower.get("type") or clean_attrs_lower.get("severity") or "I").upper()
+                short_text = clean_attrs_lower.get("shorttext") or clean_attrs_lower.get("text") or ""
+                msgid = clean_attrs_lower.get("msgid")
+                msgno = clean_attrs_lower.get("msgno")
 
                 # Extract message variables
                 variables = []
                 for v_key in ("msgv1", "msgv2", "msgv3", "msgv4"):
-                    val = clean_attrs.get(v_key)
+                    val = clean_attrs_lower.get(v_key)
                     if val:
                         variables.append(val)
 
@@ -423,18 +425,26 @@ class SAPADTClient:
                         line = int(match.group(1))
                         if match.group(2):
                             col = int(match.group(2))
+                    else:
+                        match_alt = re.search(r"#(?:line=)?(\d+)(?:(?:,|;col=|;offset=)(\d+))?", raw_uri)
+                        if match_alt:
+                            line = int(match_alt.group(1))
+                            if match_alt.group(2):
+                                col = int(match_alt.group(2))
 
-                if line is None and "line" in clean_attrs:
+                if line is None and "line" in clean_attrs_lower:
                     try:
-                        line = int(clean_attrs["line"])
+                        line = int(clean_attrs_lower["line"])
                     except (ValueError, TypeError):
                         pass
 
-                if col is None and "offset" in clean_attrs:
+                if col is None and ("offset" in clean_attrs_lower or "column" in clean_attrs_lower):
                     try:
-                        col = int(clean_attrs["offset"])
+                        col = int(clean_attrs_lower.get("offset") or clean_attrs_lower.get("column"))
                     except (ValueError, TypeError):
                         pass
+
+                raw_safe = {k: v for k, v in raw_attribs.items() if not any(s in k.lower() for s in ("pass", "sec", "tok"))}
 
                 messages.append(
                     SAPCheckMessage(
@@ -446,6 +456,7 @@ class SAPADTClient:
                         variables=variables,
                         line=line,
                         column=col,
+                        raw_safe_metadata=raw_safe,
                     )
                 )
 
@@ -463,6 +474,7 @@ class SAPADTClient:
             status=overall_status,
             reporter=reporter,
             triggering_uri=triggering_uri,
+            check_report_status=check_report_status,
             messages=messages,
             http_status=http_status,
             content_type=content_type,

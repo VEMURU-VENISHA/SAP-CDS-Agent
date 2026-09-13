@@ -246,6 +246,7 @@ class SAPCheckrunResult(BaseModel):
     status: SAPValidationStatus = Field(default=SAPValidationStatus.UNAVAILABLE, description="Overall SAP validation outcome")
     reporter: Optional[str] = Field(default="abapCheckRun", description="ADT reporter identifier")
     triggering_uri: Optional[str] = Field(default=None, description="Target object ADT URI that was checked")
+    check_report_status: Optional[str] = Field(default=None, description="Status attribute from checkReport (e.g. 'processed')")
     messages: List[SAPCheckMessage] = Field(default_factory=list, description="List of check messages returned")
     http_status: Optional[int] = Field(default=None, description="HTTP status code from ADT checkrun response")
     content_type: Optional[str] = Field(default=None, description="Content-Type header from ADT response")

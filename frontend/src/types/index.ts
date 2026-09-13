@@ -181,6 +181,7 @@ export interface SAPCheckrunResult {
   status: SAPValidationStatus;
   reporter?: string;
   triggering_uri?: string;
+  check_report_status?: string;
   messages: SAPCheckMessage[];
   http_status?: number;
   content_type?: string;
