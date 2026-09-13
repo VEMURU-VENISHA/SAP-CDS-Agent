@@ -182,20 +182,167 @@ async def test_adt_connector_search_cds_exact():
         assert candidates[0].is_extendable is True
 
 
+SAMPLE_SEARCH_XML = """<?xml version="1.0" encoding="utf-8"?>
+<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">
+  <adtcore:objectReference adtcore:uri="/sap/bc/adt/ddic/ddl/sources/i_salesorder"
+                           adtcore:type="DDLS/DF"
+                           adtcore:name="I_SalesOrder"
+                           adtcore:packageName="SD_FIO_SLS"
+                           adtcore:description="Sales Order View Entity"/>
+  <adtcore:objectReference adtcore:uri="/sap/bc/adt/ddic/ddl/sources/i_salesorderitem"
+                           adtcore:type="DDLS/DF"
+                           adtcore:name="I_SalesOrderItem"
+                           adtcore:packageName="SD_FIO_SLS"
+                           adtcore:description="Sales Order Item View Entity"/>
+  <adtcore:objectReference adtcore:uri="/sap/bc/adt/programs/programs/z_report"
+                           adtcore:type="PROG/P"
+                           adtcore:name="Z_REPORT"
+                           adtcore:packageName="ZTEST"
+                           adtcore:description="Ignored Non-CDS Program"/>
+</adtcore:objectReferences>
+"""
+
+
 @pytest.mark.asyncio
-async def test_adt_connector_search_cds_unverified_quicksearch_fallback():
-    """Verifies that unverified search handles failures gracefully without crashing or faking data."""
+async def test_client_search_information_system_success():
+    observed_requests = []
+
     def mock_handler(request: httpx.Request) -> httpx.Response:
-        # Simulate quicksearch 404 or 500 on unverified endpoint
-        return httpx.Response(404, text="Quicksearch endpoint not activated")
+        observed_requests.append(request)
+        assert request.url.path == "/sap/bc/adt/repository/informationsystem/search"
+        assert request.url.params.get("operation") == "quickSearch"
+        assert request.url.params.get("query") == "DDLSALES*"
+        assert request.url.params.get("maxResults") == "51"
+        return httpx.Response(200, text=SAMPLE_SEARCH_XML)
+
+    transport = httpx.MockTransport(mock_handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://s4dev.company.corp:44300") as http_client:
+        adt_client = SAPADTClient(settings=create_test_settings(), client=http_client)
+        hits = await adt_client.search_information_system("DDLSALES", max_results=51)
+
+    assert len(hits) == 3
+    assert hits[0]["name"] == "I_SalesOrder"
+    assert hits[0]["type"] == "DDLS/DF"
+    assert hits[0]["package"] == "SD_FIO_SLS"
+    assert hits[1]["name"] == "I_SalesOrderItem"
+    assert hits[2]["name"] == "Z_REPORT"
+
+
+@pytest.mark.asyncio
+async def test_client_search_information_system_empty_results():
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text='<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core"/>')
+
+    transport = httpx.MockTransport(mock_handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://s4dev.company.corp:44300") as http_client:
+        adt_client = SAPADTClient(settings=create_test_settings(), client=http_client)
+        hits = await adt_client.search_information_system("NON_EXISTENT_VIEW")
+
+    assert hits == []
+
+
+@pytest.mark.asyncio
+async def test_client_search_information_system_malformed_xml():
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<corrupt>unclosed xml payload")
+
+    transport = httpx.MockTransport(mock_handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://s4dev.company.corp:44300") as http_client:
+        adt_client = SAPADTClient(settings=create_test_settings(), client=http_client)
+        hits = await adt_client.search_information_system("SALES")
+
+    assert hits == []
+
+
+@pytest.mark.asyncio
+async def test_client_search_information_system_http_errors():
+    def mock_401(req: httpx.Request): return httpx.Response(401, text="Unauthorized")
+    def mock_403(req: httpx.Request): return httpx.Response(403, text="Forbidden")
+    def mock_500(req: httpx.Request): return httpx.Response(500, text="Internal Server Error")
+
+    # 401
+    async with httpx.AsyncClient(transport=httpx.MockTransport(mock_401), base_url="https://s4dev.company.corp:44300") as h:
+        with pytest.raises(SAPAuthenticationError):
+            await SAPADTClient(settings=create_test_settings(), client=h).search_information_system("SALES")
+
+    # 403
+    async with httpx.AsyncClient(transport=httpx.MockTransport(mock_403), base_url="https://s4dev.company.corp:44300") as h:
+        with pytest.raises(SAPPermissionError):
+            await SAPADTClient(settings=create_test_settings(), client=h).search_information_system("SALES")
+
+    # 500
+    async with httpx.AsyncClient(transport=httpx.MockTransport(mock_500), base_url="https://s4dev.company.corp:44300") as h:
+        with pytest.raises(SAPConnectorError):
+            await SAPADTClient(settings=create_test_settings(), client=h).search_information_system("SALES")
+
+
+@pytest.mark.asyncio
+async def test_adt_connector_search_cds_with_ddl_enrichment():
+    """Verifies that search_cds queries informationsystem/search and enriches hits via get_ddl_source."""
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url).lower()
+        if "informationsystem/search" in url_str:
+            return httpx.Response(200, text=SAMPLE_SEARCH_XML)
+        if request.url.path.endswith("/i_salesorderitem"):
+            # Return item DDL
+            item_ddl = """
+            @EndUserText.label: 'Sales Order Item'
+            @VDM.viewType: #BASIC
+            define view entity I_SalesOrderItem
+              as select from vbap as Item
+            {
+              key Item.vbeln as SalesOrder,
+              key Item.posnr as SalesOrderItem,
+                  Item.matnr as Material
+            }
+            """
+            return httpx.Response(200, text=item_ddl)
+        if request.url.path.endswith("/i_salesorder"):
+            return httpx.Response(200, text=SAMPLE_SALES_ORDER_DDL)
+        return httpx.Response(404, text="Not found")
 
     transport = httpx.MockTransport(mock_handler)
     async with httpx.AsyncClient(transport=transport, base_url="https://s4dev.company.corp:44300") as http_client:
         adt_client = SAPADTClient(settings=create_test_settings(), client=http_client)
         connector = SAPADTConnector(settings=create_test_settings(), client=adt_client)
 
-        candidates = await connector.search_cds("UNKNOWN_QUERY_*")
-        assert candidates == []
+        candidates = await connector.search_cds("DDLSALES*", limit=10)
+
+    # Z_REPORT was ignored because it's not a CDS view (PROG/P)
+    # I_SalesOrder and I_SalesOrderItem should both be enriched with real DDL metadata!
+    assert len(candidates) == 2
+    order_cand = next(c for c in candidates if c.view_name == "I_SalesOrder")
+    assert order_cand.layer == CDSLayer.BASIC
+    assert "SalesOrder" in order_cand.key_fields
+    assert order_cand.is_extendable is True
+    assert "vbak" in order_cand.source_tables
+
+    item_cand = next(c for c in candidates if c.view_name == "I_SalesOrderItem")
+    assert item_cand.layer == CDSLayer.BASIC
+    assert "SalesOrderItem" in item_cand.key_fields
+    assert "vbap" in item_cand.source_tables
+
+
+@pytest.mark.asyncio
+async def test_adt_connector_search_cds_respects_limit():
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url).lower()
+        if "informationsystem/search" in url_str:
+            return httpx.Response(200, text=SAMPLE_SEARCH_XML)
+        if "ddl/sources/i_salesorder" in url_str:
+            return httpx.Response(200, text=SAMPLE_SALES_ORDER_DDL)
+        return httpx.Response(404, text="Not found")
+
+    transport = httpx.MockTransport(mock_handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://s4dev.company.corp:44300") as http_client:
+        adt_client = SAPADTClient(settings=create_test_settings(), client=http_client)
+        connector = SAPADTConnector(settings=create_test_settings(), client=adt_client)
+
+        # Request limit=1
+        candidates = await connector.search_cds("DDLSALES*", limit=1)
+
+    assert len(candidates) == 1
+    assert candidates[0].view_name == "I_SalesOrder"
 
 
 @pytest.mark.asyncio

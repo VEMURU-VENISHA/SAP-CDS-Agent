@@ -204,34 +204,83 @@ class SAPADTClient:
             logger.warning("SAP ADT connectivity probe failed: %s", e)
             return False
 
-    async def search_repository_unverified(
+    @staticmethod
+    def _parse_search_xml(xml_text: str) -> List[Dict[str, str]]:
+        """Parses SAP ADT object references XML response returned by information system search."""
+        import xml.etree.ElementTree as ET
+
+        results: List[Dict[str, str]] = []
+        if not xml_text or not xml_text.strip():
+            return results
+
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError as e:
+            logger.warning("Failed to parse SAP ADT search XML: %s", e)
+            return results
+
+        for elem in root.iter():
+            tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+            if tag == "objectReference":
+                attrs = elem.attrib
+                name = None
+                obj_type = None
+                description = ""
+                package_name = ""
+                uri = ""
+
+                for k, v in attrs.items():
+                    clean_k = k.split("}")[-1] if "}" in k else k
+                    if clean_k == "name":
+                        name = v
+                    elif clean_k == "type":
+                        obj_type = v
+                    elif clean_k == "description":
+                        description = v
+                    elif clean_k in ("packageName", "package"):
+                        package_name = v
+                    elif clean_k == "uri":
+                        uri = v
+
+                if name:
+                    results.append({
+                        "name": name,
+                        "type": obj_type or "DDLS/DF",
+                        "description": description,
+                        "package": package_name,
+                        "uri": uri,
+                    })
+        return results
+
+    async def search_information_system(
         self,
         query: str,
-        limit: int = 50,
+        max_results: int = 51,
     ) -> List[Dict[str, str]]:
-        """Invokes the documented ADT repository quick search service.
+        """Invokes the verified SAP ADT repository information-system search service.
 
-        Endpoint: GET /sap/bc/adt/repository/quicksearch
-        Evidence: DOCUMENTED BUT NOT YET SYSTEM-VERIFIED.
-        Quarantined: Catches 404 or unverified failures safely without crashing.
+        Endpoint: GET /sap/bc/adt/repository/informationsystem/search
+        Evidence: VERIFIED IN OUR SYSTEM (Observed directly in Eclipse ABAP Communication Log).
+        Observed parameters: operation=quickSearch, query=..., maxResults=...
         """
         self._validate_config()
-        path = "/sap/bc/adt/repository/quicksearch"
+
+        effective_max = max(1, min(max_results, 200))
+        clean_query = query.strip()
+        formatted_query = clean_query if clean_query.endswith("*") else f"{clean_query}*"
+
+        path = "/sap/bc/adt/repository/informationsystem/search"
         params = {
-            "operation": "quickSearchSuggest",
-            "query": query,
-            "maxResults": str(limit),
-            "type": "DDLS/DF",
-            "sap-client": self.settings.SAP_CLIENT,
+            "operation": "quickSearch",
+            "query": formatted_query,
+            "maxResults": str(effective_max),
         }
         headers = self._get_auth_headers()
-        headers["Accept"] = "application/xml, text/xml"
-
-        logger.info(
-            "Invoking system-unverified endpoint: %s?query=%s [Status: DOCUMENTED_ONLY]",
-            path,
-            query,
+        headers["Accept"] = (
+            "application/xml, text/xml, application/vnd.sap.adt.repository.informationsystem.search.v1+xml, */*"
         )
+
+        self._log_request("GET", path)
 
         try:
             client = await self._get_client()
@@ -242,21 +291,32 @@ class SAPADTClient:
                     resp = await http.get(path, params=params, headers=headers)
 
             self._log_request("GET", path, resp.status_code)
-            if resp.status_code in (200, 304):
-                # Basic extraction of object names from XML if returned
-                matches: List[Dict[str, str]] = []
-                for m in re.finditer(r'<adtcore:objectReference[^>]*adtcore:name="([^"]+)"[^>]*adtcore:type="DDLS/DF"[^>]*>', resp.text):
-                    matches.append({"name": m.group(1), "type": "DDLS/DF"})
-                return matches
 
-            logger.warning(
-                "Documented repository quicksearch returned status %d. Endpoint is system-unverified.",
-                resp.status_code,
+            if resp.status_code in (200, 304):
+                return self._parse_search_xml(resp.text)
+
+            if resp.status_code == 401:
+                raise SAPAuthenticationError("Authentication failed during SAP repository search.")
+            if resp.status_code == 403:
+                raise SAPPermissionError(resource=path)
+            if resp.status_code == 404:
+                logger.warning("SAP repository search endpoint returned 404.")
+                return []
+
+            raise SAPConnectorError(
+                message=f"SAP repository search returned unexpected HTTP status {resp.status_code}.",
+                status_code=resp.status_code,
             )
-            return []
+
+        except httpx.TimeoutException as e:
+            logger.error("SAP repository search timed out: %s", self._sanitize_url_for_logging(path))
+            raise SAPConnectionError(f"SAP search timed out on {path}: {e}")
+        except httpx.ConnectError as e:
+            logger.error("Failed to connect to SAP during search: %s", e)
+            raise SAPConnectionError(f"Failed to connect to SAP host: {e}")
+        except (SAPAuthenticationError, SAPPermissionError, SAPConnectorError):
+            raise
         except Exception as e:
-            logger.warning(
-                "Documented repository quicksearch failed (%s). Handling gracefully as system-unverified.",
-                e,
-            )
-            return []
+            logger.error("Unexpected error in SAP repository search: %s", e)
+            raise SAPConnectorError(f"SAP search unexpected error: {e}")
+

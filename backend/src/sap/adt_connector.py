@@ -76,40 +76,57 @@ class SAPADTConnector(ISAPConnector):
         layer: Optional[CDSLayer] = None,
         limit: int = 50,
     ) -> List[CDSCandidate]:
-        """Discovers CDS candidates in the target SAP system.
+        """Discovers real CDS candidates in target SAP system using verified ADT endpoints.
 
-        Strategy:
-        1. Exact match lookup via verified DDL source endpoint.
-        2. If query is a pattern or not an exact hit, attempts documented repository quicksearch
-           (system-unverified, handled safely).
-        3. Never emits mock or synthetic metadata.
+        Endpoints:
+        - GET /sap/bc/adt/repository/informationsystem/search (VERIFIED IN SYSTEM)
+        - GET /sap/bc/adt/ddic/ddl/sources/{name} (VERIFIED IN SYSTEM)
         """
         candidates: List[CDSCandidate] = []
         clean_query = query.strip()
+        seen_names = set()
 
-        # 1. Attempt direct exact lookup on the verified DDL source endpoint
-        try:
-            ddl = await self.client.get_ddl_source(clean_query)
-            candidate = self.parser.parse_candidate(ddl, object_name=clean_query)
-            if layer is None or candidate.layer == layer:
-                candidates.append(candidate)
-            return candidates
-        except (SAPNotFoundError, Exception) as direct_err:
-            logger.debug("Direct DDL lookup for '%s' did not resolve: %s", clean_query, direct_err)
-
-        # 2. Attempt documented repository quicksearch (Level 3: System-unverified)
-        matches = await self.client.search_repository_unverified(clean_query, limit=limit)
-        for item in matches:
-            obj_name = item.get("name")
-            if not obj_name:
-                continue
+        # 1. Direct exact lookup if query is a specific view entity without wildcards
+        if "*" not in clean_query:
             try:
-                obj_ddl = await self.client.get_ddl_source(obj_name)
-                cand = self.parser.parse_candidate(obj_ddl, object_name=obj_name)
-                if layer is None or cand.layer == layer:
-                    candidates.append(cand)
-            except Exception as e:
-                logger.debug("Could not resolve DDL source for search candidate '%s': %s", obj_name, e)
+                ddl = await self.client.get_ddl_source(clean_query)
+                candidate = self.parser.parse_candidate(ddl, object_name=clean_query)
+                if layer is None or candidate.layer == layer:
+                    candidates.append(candidate)
+                    seen_names.add(candidate.view_name.upper())
+            except (SAPNotFoundError, Exception) as direct_err:
+                logger.debug("Direct DDL lookup for '%s' did not resolve: %s", clean_query, direct_err)
+
+        # 2. Query verified repository information system search endpoint
+        search_hits = await self.client.search_information_system(clean_query, max_results=limit)
+
+        for hit in search_hits:
+            obj_name = hit.get("name")
+            if not obj_name or obj_name.upper() in seen_names:
+                continue
+
+            obj_type = (hit.get("type") or "").upper()
+            uri = (hit.get("uri") or "").lower()
+
+            # Filter for CDS Data Definitions
+            if obj_type in ("DDLS/DF", "DDLS") or "ddic/ddl/sources" in uri or not obj_type:
+                # Filter by package if specified
+                hit_pkg = hit.get("package")
+                if package and hit_pkg and hit_pkg.upper() != package.upper():
+                    continue
+
+                # Enrich with authoritative real DDL from the verified source endpoint
+                try:
+                    obj_ddl = await self.client.get_ddl_source(obj_name)
+                    cand = self.parser.parse_candidate(obj_ddl, object_name=obj_name)
+                    if layer is None or cand.layer == layer:
+                        candidates.append(cand)
+                        seen_names.add(obj_name.upper())
+                except Exception as e:
+                    logger.debug("Could not retrieve DDL source for search candidate '%s': %s", obj_name, e)
+
+            if len(candidates) >= limit:
+                break
 
         return candidates
 
