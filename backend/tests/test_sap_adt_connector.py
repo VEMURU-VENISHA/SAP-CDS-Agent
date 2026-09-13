@@ -368,10 +368,6 @@ async def test_adt_connector_refuses_write_operations():
         await connector.create_cds_draft("Z_Draft", "code", "ZPKG", "TR123")
     assert "strictly read-only" in str(exc_draft.value)
 
-    with pytest.raises(SAPConnectorError) as exc_val:
-        await connector.validate_cds("code")
-    assert "deferred to Milestone 4" in str(exc_val.value)
-
     with pytest.raises(SAPConnectorError) as exc_act:
         await connector.activate_cds("Z_Draft", "TR123")
     assert "strictly read-only" in str(exc_act.value)

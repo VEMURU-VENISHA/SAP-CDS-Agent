@@ -4,29 +4,30 @@ import re
 from typing import Any, Dict, List, Optional
 from src.agents.base import BaseAgent
 from src.agents.state import CDSWorkflowState
-from src.models.domain import CDSDraft, DecisionAction, ValidationResult
+from src.models.domain import CDSDraft, DecisionAction, SAPValidationStatus, ValidationResult
+from src.sap.connector import get_sap_connector
+from src.sap.interface import ISAPConnector
 
 
 class ValidationAgent(BaseAgent):
     """Validates CDS draft artifacts against SAP clean-core standards, syntax rules, and naming conventions.
 
-    Performs 100% static local analysis:
-    - Identifier length (<= 30 chars) and regex validity
-    - Customer namespace naming rules (Z* / Y*)
-    - Unique field aliases in projection list
-    - Mandatory access control annotations
-    - Source entity presence in candidate metadata
-    - Detection of unresolved fields and missing required concepts
-    - DDL structural integrity (matching braces, terminating semicolon)
-
-    Zero SAP checkrun endpoints are invoked in this milestone.
+    Performs Dual-Gate Validation:
+    1. Gate 1: Local static clean-core analysis (identifier length, namespace Z/Y, unique aliases, auth checks, braces, semicolon).
+    2. Gate 2: Real read-only SAP ADT checkrun:
+       - For existing repository objects (e.g. REUSE recommendation), executes POST /sap/bc/adt/checkruns?reporters=abapCheckRun.
+       - For unpersisted drafts (CREATE/EXTEND), SAP status remains UNAVAILABLE:
+         'Unpersisted Draft — SAP ADT checkrun requires a repository object URI.'
+       - A failed SAP checkrun (ERROR) marks draft REJECTED and halts progression.
+       - Absolutely zero SAP write operations are performed.
     """
 
-    def __init__(self):
+    def __init__(self, connector: Optional[ISAPConnector] = None):
         super().__init__(
             name="ValidationAgent",
-            description="Performs static local validation of CDS View Entity DDL drafts and clean-core rules.",
+            description="Performs dual-gate (local static + remote SAP ADT checkrun) validation of CDS drafts.",
         )
+        self.connector = connector or get_sap_connector()
 
     async def run(self, state: CDSWorkflowState) -> CDSWorkflowState:
         code = state.get("generated_cds_code")
@@ -41,21 +42,65 @@ class ValidationAgent(BaseAgent):
 
         # Case 1: REUSE recommendation
         if decision and decision.action == DecisionAction.REUSE:
+            rec_view = decision.recommended_view or (draft.source_views[0] if draft and draft.source_views else None)
+            repo_uri = f"/sap/bc/adt/ddic/ddl/sources/{rec_view.lower()}" if rec_view else None
+
+            sap_status = SAPValidationStatus.UNAVAILABLE
+            sap_reason = "SAP connector unconnected or unconfigured."
+            sap_checkrun_res = None
+            syntax_errors: List[str] = []
+            governance_warnings: List[str] = []
+            details: List[Dict[str, Any]] = [
+                {"check": "Standard VDM View Reuse", "passed": True, "detail": f"Reusing standard SAP released view '{rec_view}' as-is."},
+                {"check": "Clean Core Footprint", "passed": True, "detail": "Zero custom ABAP/CDS code deployed."},
+            ]
+            is_valid = True
+
+            if repo_uri and self.connector:
+                try:
+                    is_conn = await self.connector.is_connected()
+                    if is_conn:
+                        sap_res = await self.connector.validate_cds(view_definition=code or "", repository_uri=repo_uri)
+                        sap_status = sap_res.sap_validation_status
+                        sap_checkrun_res = sap_res.sap_checkrun_result
+                        sap_reason = sap_res.sap_checkrun_reason
+
+                        if sap_status == SAPValidationStatus.ERROR:
+                            is_valid = False
+                            syntax_errors.extend(sap_res.syntax_errors)
+                            details.append({"check": "SAP ADT Remote Checkrun", "passed": False, "detail": "SAP compiler errors detected."})
+                        elif sap_status == SAPValidationStatus.WARNING:
+                            governance_warnings.extend(sap_res.governance_warnings)
+                            details.append({"check": "SAP ADT Remote Checkrun", "passed": True, "detail": f"SAP checkrun passed with {len(sap_res.governance_warnings)} warning(s)."})
+                        elif sap_status == SAPValidationStatus.PASS:
+                            details.append({"check": "SAP ADT Remote Checkrun", "passed": True, "detail": "All SAP syntax/compiler checks passed cleanly."})
+                        else:
+                            details.append({"check": "SAP ADT Remote Checkrun", "passed": False, "detail": sap_reason or "SAP checkrun unavailable."})
+                    else:
+                        sap_status = SAPValidationStatus.UNAVAILABLE
+                        sap_reason = "SAP DEV system is offline or unconnected."
+                        details.append({"check": "SAP ADT Remote Checkrun", "passed": False, "detail": sap_reason})
+                except Exception as e:
+                    sap_status = SAPValidationStatus.UNAVAILABLE
+                    sap_reason = f"SAP checkrun call failed: {e}"
+                    details.append({"check": "SAP ADT Remote Checkrun", "passed": False, "detail": sap_reason})
+
             validation = ValidationResult(
-                is_valid=True,
-                syntax_errors=[],
+                is_valid=is_valid,
+                syntax_errors=syntax_errors,
                 naming_convention_violations=[],
-                clean_core_compliance_score=100.0,
-                governance_warnings=[],
-                details=[
-                    {"check": "Standard VDM View Reuse", "passed": True, "detail": "Reusing standard SAP released view as-is."},
-                    {"check": "Clean Core Footprint", "passed": True, "detail": "Zero custom ABAP/CDS code deployed."},
-                ],
+                clean_core_compliance_score=100.0 if is_valid else 0.0,
+                governance_warnings=governance_warnings,
+                details=details,
+                sap_validation_status=sap_status,
+                sap_checkrun_result=sap_checkrun_res,
+                sap_checkrun_reason=sap_reason,
             )
             if draft:
-                draft.generation_status = "VALIDATED"
+                draft.generation_status = "VALIDATED" if is_valid else "REJECTED"
+                draft.sap_validation_status = sap_status
             state["validation_result"] = validation
-            self.log_audit(state, "VALIDATION_COMPLETED", {"is_valid": True, "action": "REUSE"})
+            self.log_audit(state, "VALIDATION_COMPLETED", {"is_valid": is_valid, "action": "REUSE", "sap_status": sap_status.value})
             state["current_step"] = "GOVERNANCE"
             return state
 
@@ -70,9 +115,12 @@ class ValidationAgent(BaseAgent):
                 details=[
                     {"check": "Sufficient Evidence Check", "passed": False, "detail": "Unresolved association targets or ambiguous metadata."},
                 ],
+                sap_validation_status=SAPValidationStatus.INSUFFICIENT_EVIDENCE,
+                sap_checkrun_reason="Halting validation: Insufficient verified SAP evidence in requirement mapping.",
             )
             if draft:
                 draft.generation_status = "INSUFFICIENT_EVIDENCE"
+                draft.sap_validation_status = SAPValidationStatus.INSUFFICIENT_EVIDENCE
             state["validation_result"] = validation
             self.log_audit(state, "VALIDATION_HALTED", {"reason": "INSUFFICIENT_EVIDENCE"})
             state["current_step"] = "GOVERNANCE"
@@ -191,9 +239,21 @@ class ValidationAgent(BaseAgent):
         score -= len(governance_warnings) * 5.0
         score = max(0.0, min(100.0, score))
 
+        # Gate 2: Remote SAP ADT Checkrun evaluation
+        if not is_valid:
+            sap_status = SAPValidationStatus.UNAVAILABLE
+            sap_reason = "Local static validation failed; remote SAP checkrun bypassed."
+            details.append({"check": "SAP ADT Remote Checkrun", "passed": False, "detail": sap_reason})
+        else:
+            # In-memory unpersisted draft (CREATE or EXTEND)
+            sap_status = SAPValidationStatus.UNAVAILABLE
+            sap_reason = "Unpersisted Draft — SAP ADT checkrun requires a repository object URI."
+            details.append({"check": "SAP ADT Remote Checkrun", "passed": False, "detail": sap_reason})
+
         if draft:
             draft.validation_errors = syntax_errors + naming_violations
             draft.generation_status = "VALIDATED" if is_valid else "REJECTED"
+            draft.sap_validation_status = sap_status
 
         validation = ValidationResult(
             is_valid=is_valid,
@@ -202,6 +262,8 @@ class ValidationAgent(BaseAgent):
             clean_core_compliance_score=score,
             governance_warnings=governance_warnings,
             details=details,
+            sap_validation_status=sap_status,
+            sap_checkrun_reason=sap_reason,
         )
 
         state["validation_result"] = validation

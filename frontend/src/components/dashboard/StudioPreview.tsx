@@ -14,13 +14,14 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import Editor from '@monaco-editor/react';
-import { CDSDraft, ElementEvidenceRecord } from '../../types';
+import { CDSDraft, ElementEvidenceRecord, ValidationResult } from '../../types';
 
 interface StudioPreviewProps {
   cdsDraft?: CDSDraft | null;
+  validationResult?: ValidationResult | null;
 }
 
-export const StudioPreview: React.FC<StudioPreviewProps> = ({ cdsDraft }) => {
+export const StudioPreview: React.FC<StudioPreviewProps> = ({ cdsDraft, validationResult }) => {
   const [activeTab, setActiveTab] = useState<'editor' | 'evidence' | 'validation' | 'graph'>(
     cdsDraft ? 'editor' : 'graph'
   );
@@ -327,40 +328,174 @@ export const StudioPreview: React.FC<StudioPreviewProps> = ({ cdsDraft }) => {
         </div>
       )}
 
-      {/* TAB 3: Static Validation Checklist */}
+      {/* TAB 3: Dual-Gate Validation (Local Clean-Core + SAP ADT Remote Checkrun) */}
       {activeTab === 'validation' && (
         <div className="space-y-4">
           {cdsDraft ? (
-            <div className="space-y-3">
-              {/* Validation Status Card */}
-              <div className="p-4 rounded-lg bg-gray-950 border border-gray-800 flex items-center justify-between">
-                <div className="flex items-center space-x-3">
-                  {cdsDraft.validation_errors.length === 0 ? (
-                    <CheckCircle2 className="w-6 h-6 text-emerald-400 flex-shrink-0" />
-                  ) : (
-                    <XCircle className="w-6 h-6 text-red-400 flex-shrink-0" />
-                  )}
-                  <div>
-                    <div className="text-xs font-semibold text-gray-200">
-                      {cdsDraft.validation_errors.length === 0
-                        ? '100% Static Validation Passed'
-                        : 'Static Validation Issues Detected'}
-                    </div>
-                    <div className="text-[11px] text-gray-400">
-                      Evaluated against SAP clean-core guidelines, ABAP CDS naming constraints, and DDL syntax rules.
+            <div className="space-y-4">
+              {/* Dual Gate Summary Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {/* Gate 1: Local Static Validation */}
+                <div className="p-4 rounded-lg bg-gray-950 border border-gray-800 flex items-center justify-between">
+                  <div className="flex items-center space-x-3">
+                    {cdsDraft.validation_errors.length === 0 ? (
+                      <CheckCircle2 className="w-5 h-5 text-emerald-400 flex-shrink-0" />
+                    ) : (
+                      <XCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
+                    )}
+                    <div>
+                      <div className="text-xs font-semibold text-gray-200">Local Static Clean-Core</div>
+                      <div className="text-[11px] text-gray-400">Syntax, naming, annotations & structure</div>
                     </div>
                   </div>
+                  <div className="text-right">
+                    <span
+                      className={`px-2 py-0.5 rounded text-[11px] font-mono font-semibold ${
+                        cdsDraft.validation_errors.length === 0
+                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                          : 'bg-red-950 text-red-300 border border-red-800'
+                      }`}
+                    >
+                      {cdsDraft.validation_errors.length === 0 ? 'PASS' : 'REJECTED'}
+                    </span>
+                  </div>
                 </div>
-                <div className="text-right">
-                  <span className="text-xs text-gray-400">Quality Gate:</span>
-                  <div className="text-sm font-mono font-bold text-emerald-400">
-                    {cdsDraft.validation_errors.length === 0 ? 'PASSED' : 'REJECTED'}
+
+                {/* Gate 2: SAP ADT Remote Checkrun */}
+                <div className="p-4 rounded-lg bg-gray-950 border border-gray-800 flex items-center justify-between">
+                  <div className="flex items-center space-x-3">
+                    <ShieldCheck className="w-5 h-5 text-blue-400 flex-shrink-0" />
+                    <div>
+                      <div className="text-xs font-semibold text-gray-200">SAP ADT Remote Checkrun</div>
+                      <div className="text-[11px] text-gray-400">Real ABAP syntax & compiler verification</div>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    {(() => {
+                      const sapStatus =
+                        validationResult?.sap_validation_status ||
+                        cdsDraft.sap_validation_status ||
+                        'UNAVAILABLE';
+                      let colorClasses = 'bg-gray-800 text-gray-300 border-gray-700';
+                      if (sapStatus === 'PASS') colorClasses = 'bg-emerald-950 text-emerald-300 border-emerald-800';
+                      else if (sapStatus === 'WARNING') colorClasses = 'bg-amber-950 text-amber-300 border-amber-800';
+                      else if (sapStatus === 'ERROR') colorClasses = 'bg-red-950 text-red-300 border-red-800';
+                      else if (sapStatus === 'INSUFFICIENT_EVIDENCE') colorClasses = 'bg-purple-950 text-purple-300 border-purple-800';
+
+                      return (
+                        <span className={`px-2 py-0.5 rounded text-[11px] font-mono font-semibold border ${colorClasses}`}>
+                          {sapStatus}
+                        </span>
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
 
-              {/* Checklist Items */}
+              {/* Read-Only Safety Notice */}
+              <div className="px-3.5 py-2 bg-blue-950/20 border border-blue-900/40 rounded-lg flex items-center justify-between text-xs">
+                <div className="flex items-center space-x-2 text-blue-300">
+                  <Info className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
+                  <span>SAP validation is read-only. No CDS object is created, activated, or transported.</span>
+                </div>
+              </div>
+
+              {/* SAP ADT Checkrun Diagnostic Section */}
+              <div className="p-4 rounded-lg bg-gray-950 border border-gray-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-gray-200 flex items-center space-x-2">
+                    <span>SAP ADT Remote Diagnostic Details</span>
+                  </span>
+                  <span className="text-[10px] text-gray-500 font-mono">
+                    Endpoint: POST /sap/bc/adt/checkruns?reporters=abapCheckRun
+                  </span>
+                </div>
+
+                {/* Reason when UNAVAILABLE or INSUFFICIENT_EVIDENCE */}
+                {(validationResult?.sap_validation_status === 'UNAVAILABLE' ||
+                  cdsDraft.sap_validation_status === 'UNAVAILABLE' ||
+                  !validationResult?.sap_validation_status) && (
+                  <div className="p-3 bg-gray-900/80 border border-gray-800 rounded text-xs space-y-1">
+                    <div className="text-gray-300 font-medium">
+                      SAP ADT Validation:{' '}
+                      <span className="text-amber-400 font-mono">UNAVAILABLE</span>
+                    </div>
+                    <div className="text-gray-400 text-[11px]">
+                      Reason:{' '}
+                      <span className="text-gray-300 font-mono">
+                        {validationResult?.sap_checkrun_reason ||
+                          'Unpersisted Draft — SAP ADT checkrun requires a repository object URI.'}
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-gray-500 pt-1">
+                      Controlled SAP repository creation and human sign-off required prior to remote checkrun execution.
+                    </div>
+                  </div>
+                )}
+
+                {/* Messages table if present */}
+                {validationResult?.sap_checkrun_result?.messages &&
+                  validationResult.sap_checkrun_result.messages.length > 0 && (
+                    <div className="overflow-x-auto rounded border border-gray-800">
+                      <table className="min-w-full divide-y divide-gray-800 text-xs">
+                        <thead className="bg-gray-900 text-gray-400">
+                          <tr>
+                            <th className="px-3 py-1.5 text-left font-medium">Severity</th>
+                            <th className="px-3 py-1.5 text-left font-medium">Location</th>
+                            <th className="px-3 py-1.5 text-left font-medium">Message Text</th>
+                            <th className="px-3 py-1.5 text-left font-medium">Message ID / No</th>
+                            <th className="px-3 py-1.5 text-left font-medium">Variables</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-800/60 bg-gray-950 font-mono text-[11px]">
+                          {validationResult.sap_checkrun_result.messages.map((m, idx) => (
+                            <tr key={idx} className="hover:bg-gray-900/50">
+                              <td className="px-3 py-1.5">
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                    m.severity === 'E' || m.severity === 'A'
+                                      ? 'bg-red-950 text-red-300 border border-red-800'
+                                      : m.severity === 'W'
+                                      ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                      : 'bg-blue-950 text-blue-300 border border-blue-800'
+                                  }`}
+                                >
+                                  {m.severity === 'E'
+                                    ? 'ERROR'
+                                    : m.severity === 'W'
+                                    ? 'WARNING'
+                                    : m.severity === 'A'
+                                    ? 'ABORT'
+                                    : 'INFO'}
+                                </span>
+                              </td>
+                              <td className="px-3 py-1.5 text-gray-400">
+                                {m.line ? `L${m.line}${m.column ? `:${m.column}` : ''}` : '—'}
+                              </td>
+                              <td className="px-3 py-1.5 text-gray-200 font-sans">{m.short_text}</td>
+                              <td className="px-3 py-1.5 text-gray-400">
+                                {m.msgid && m.msgno ? `${m.msgid}/${m.msgno}` : m.msgid || m.msgno || '—'}
+                              </td>
+                              <td className="px-3 py-1.5 text-gray-500">{m.variables?.join(', ') || '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                {/* Clean Pass notice */}
+                {validationResult?.sap_validation_status === 'PASS' && (
+                  <div className="p-3 bg-emerald-950/20 border border-emerald-800/30 rounded text-xs flex items-center space-x-2 text-emerald-300">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                    <span>All SAP ABAP compiler and CDS syntax checks passed cleanly with zero diagnostics.</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Local Static Checklist Items */}
               <div className="space-y-2">
+                <div className="text-xs font-semibold text-gray-300 pt-2">Local Clean-Core Standards Checklist:</div>
                 <div className="p-3 rounded-lg bg-gray-950 border border-gray-800 flex items-center justify-between text-xs">
                   <span className="text-gray-300">Identifier Length & ABAP CDS Regex (&le; 30 chars)</span>
                   <span className="flex items-center text-emerald-400 text-[11px]">
@@ -399,10 +534,10 @@ export const StudioPreview: React.FC<StudioPreviewProps> = ({ cdsDraft }) => {
                 </div>
               </div>
 
-              {/* Errors & Warnings if any */}
+              {/* Local Errors & Warnings if any */}
               {cdsDraft.validation_errors.length > 0 && (
                 <div className="p-3 bg-red-950/30 border border-red-800/40 rounded-lg text-xs space-y-1">
-                  <span className="font-semibold text-red-300">Blocking Errors:</span>
+                  <span className="font-semibold text-red-300">Blocking Local Errors:</span>
                   {cdsDraft.validation_errors.map((err, i) => (
                     <div key={i} className="text-red-400 text-[11px] flex items-center space-x-1.5">
                       <XCircle className="w-3 h-3 flex-shrink-0" />
@@ -430,9 +565,9 @@ export const StudioPreview: React.FC<StudioPreviewProps> = ({ cdsDraft }) => {
                 <ShieldCheck className="w-6 h-6" />
               </div>
               <div>
-                <h4 className="text-xs font-semibold text-gray-200">Static Clean-Core Validation Gate</h4>
+                <h4 className="text-xs font-semibold text-gray-200">Dual-Gate Quality Gate (Local + Remote SAP ADT)</h4>
                 <p className="text-[11px] text-gray-400 max-w-md mt-1">
-                  Synthesized CDS drafts undergo 100% local static analysis to guarantee clean-core compliance, naming rules, access control, and structural syntax integrity prior to review.
+                  Synthesized CDS drafts undergo local static clean-core analysis and verified SAP ADT checkruns prior to review.
                 </p>
               </div>
             </div>

@@ -22,6 +22,7 @@ from src.core.exceptions import (
     SAPPermissionError,
 )
 from src.logging_config import logger
+from src.models.domain import SAPCheckMessage, SAPCheckrunResult, SAPValidationStatus
 
 
 class SAPADTClient:
@@ -319,4 +320,258 @@ class SAPADTClient:
         except Exception as e:
             logger.error("Unexpected error in SAP repository search: %s", e)
             raise SAPConnectorError(f"SAP search unexpected error: {e}")
+
+    @staticmethod
+    def _build_checkrun_xml(repository_uri: str, version: str = "active") -> str:
+        """Constructs the verified XML checkObjectList payload for SAP ADT checkruns.
+
+        Verified schema from Eclipse ABAP Communication Log:
+        <chkrun:checkObjectList
+            xmlns:chkrun="http://www.sap.com/adt/checkrun"
+            xmlns:adtcore="http://www.sap.com/adt/core">
+            <chkrun:checkObject
+                adtcore:uri="..."
+                chkrun:version="active"/>
+        </chkrun:checkObjectList>
+        """
+        clean_uri = repository_uri.strip()
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
+<chkrun:checkObjectList
+    xmlns:chkrun="http://www.sap.com/adt/checkrun"
+    xmlns:adtcore="http://www.sap.com/adt/core">
+    <chkrun:checkObject
+        adtcore:uri="{clean_uri}"
+        chkrun:version="{version}"/>
+</chkrun:checkObjectList>"""
+
+    @staticmethod
+    def _parse_checkrun_xml(
+        xml_text: str,
+        http_status: int = 200,
+        content_type: str = "application/vnd.sap.adt.checkmessages+xml",
+    ) -> SAPCheckrunResult:
+        """Parses the verified SAP ADT checkrun XML response.
+
+        Extracts:
+        - check report status, reporter, triggering URI
+        - check messages: severity/type, short text, msgid, msgno, variables (msgv1..msgv4)
+        - source position (line, column/offset) extracted from #start=line,offset in uri or attributes
+        """
+        import xml.etree.ElementTree as ET
+
+        if not xml_text or not xml_text.strip():
+            return SAPCheckrunResult(
+                status=SAPValidationStatus.PASS,
+                reporter="abapCheckRun",
+                http_status=http_status,
+                content_type=content_type,
+                messages=[],
+            )
+
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError as e:
+            logger.warning("Failed to parse SAP ADT checkrun XML: %s", e)
+            return SAPCheckrunResult(
+                status=SAPValidationStatus.ERROR,
+                reporter="abapCheckRun",
+                http_status=http_status,
+                content_type=content_type,
+                reason=f"Malformed XML in SAP ADT checkrun response: {e}",
+                messages=[],
+            )
+
+        def _strip_ns(tag: str) -> str:
+            return tag.split("}")[-1] if "}" in tag else tag
+
+        reporter = "abapCheckRun"
+        triggering_uri = None
+        messages: List[SAPCheckMessage] = []
+
+        for elem in root.iter():
+            tag = _strip_ns(elem.tag)
+            clean_attrs = {_strip_ns(k): v for k, v in elem.attrib.items()}
+
+            if tag in ("checkReport", "report"):
+                if "reporter" in clean_attrs:
+                    reporter = clean_attrs["reporter"]
+                if "triggeringuri" in clean_attrs:
+                    triggering_uri = clean_attrs["triggeringuri"]
+                elif "triggeringUri" in clean_attrs:
+                    triggering_uri = clean_attrs["triggeringUri"]
+
+            elif tag in ("checkMessage", "message"):
+                raw_uri = clean_attrs.get("uri")
+                severity = (clean_attrs.get("type") or clean_attrs.get("severity") or "I").upper()
+                short_text = clean_attrs.get("shortText") or clean_attrs.get("text") or ""
+                msgid = clean_attrs.get("msgid")
+                msgno = clean_attrs.get("msgno")
+
+                # Extract message variables
+                variables = []
+                for v_key in ("msgv1", "msgv2", "msgv3", "msgv4"):
+                    val = clean_attrs.get(v_key)
+                    if val:
+                        variables.append(val)
+
+                # Extract line and column/offset from fragment, e.g. #start=10,5 or #start=10
+                line = None
+                col = None
+                if raw_uri:
+                    match = re.search(r"#start=(\d+)(?:,(\d+))?", raw_uri)
+                    if match:
+                        line = int(match.group(1))
+                        if match.group(2):
+                            col = int(match.group(2))
+
+                if line is None and "line" in clean_attrs:
+                    try:
+                        line = int(clean_attrs["line"])
+                    except (ValueError, TypeError):
+                        pass
+
+                if col is None and "offset" in clean_attrs:
+                    try:
+                        col = int(clean_attrs["offset"])
+                    except (ValueError, TypeError):
+                        pass
+
+                messages.append(
+                    SAPCheckMessage(
+                        uri=raw_uri,
+                        severity=severity,
+                        short_text=short_text,
+                        msgid=msgid,
+                        msgno=msgno,
+                        variables=variables,
+                        line=line,
+                        column=col,
+                    )
+                )
+
+        has_error = any(m.severity in ("E", "A") for m in messages)
+        has_warning = any(m.severity == "W" for m in messages)
+
+        if has_error:
+            overall_status = SAPValidationStatus.ERROR
+        elif has_warning:
+            overall_status = SAPValidationStatus.WARNING
+        else:
+            overall_status = SAPValidationStatus.PASS
+
+        return SAPCheckrunResult(
+            status=overall_status,
+            reporter=reporter,
+            triggering_uri=triggering_uri,
+            messages=messages,
+            http_status=http_status,
+            content_type=content_type,
+        )
+
+    async def run_checkrun(
+        self,
+        repository_uri: str,
+        version: str = "active",
+    ) -> SAPCheckrunResult:
+        """Executes a real read-only SAP ADT checkrun against a repository object URI.
+
+        Endpoint: POST /sap/bc/adt/checkruns?reporters=abapCheckRun
+        Verified Request Content-Type: application/vnd.sap.adt.checkobjects+xml
+        Verified Response Content-Type: application/vnd.sap.adt.checkmessages+xml
+
+        Conservative status mapping:
+        - E / A: ERROR
+        - W: WARNING
+        - clean: PASS
+        - unreachable / auth fail / unconfigured: UNAVAILABLE
+        - invalid/missing URI: INSUFFICIENT_EVIDENCE
+        """
+        if not repository_uri or not repository_uri.strip():
+            return SAPCheckrunResult(
+                status=SAPValidationStatus.INSUFFICIENT_EVIDENCE,
+                reason="No valid repository URI provided for SAP checkrun.",
+            )
+
+        try:
+            self._validate_config()
+        except SAPConfigurationError as e:
+            logger.warning("SAP ADT checkrun aborted due to configuration error: %s", e)
+            return SAPCheckrunResult(
+                status=SAPValidationStatus.UNAVAILABLE,
+                reason=f"SAP configuration error: {e}",
+            )
+
+        path = "/sap/bc/adt/checkruns"
+        params = {"reporters": "abapCheckRun"}
+        body = self._build_checkrun_xml(repository_uri, version=version)
+        headers = self._get_auth_headers()
+        headers["Content-Type"] = "application/vnd.sap.adt.checkobjects+xml"
+        headers["Accept"] = "application/vnd.sap.adt.checkmessages+xml"
+
+        self._log_request("POST", path)
+
+        try:
+            client = await self._get_client()
+            if self._custom_client is not None:
+                resp = await client.post(path, params=params, headers=headers, content=body)
+            else:
+                async with client as http:
+                    resp = await http.post(path, params=params, headers=headers, content=body)
+
+            self._log_request("POST", path, resp.status_code)
+
+            if resp.status_code in (200, 201):
+                return self._parse_checkrun_xml(
+                    resp.text,
+                    http_status=resp.status_code,
+                    content_type=resp.headers.get("Content-Type", ""),
+                )
+
+            if resp.status_code == 401:
+                logger.warning("SAP ADT checkrun failed: 401 Unauthorized")
+                return SAPCheckrunResult(
+                    status=SAPValidationStatus.UNAVAILABLE,
+                    http_status=401,
+                    reason="SAP ADT checkrun failed: 401 Unauthorized. Verify credentials.",
+                )
+            if resp.status_code == 403:
+                logger.warning("SAP ADT checkrun failed: 403 Forbidden")
+                return SAPCheckrunResult(
+                    status=SAPValidationStatus.UNAVAILABLE,
+                    http_status=403,
+                    reason="SAP ADT checkrun failed: 403 Forbidden. User lacks authorization.",
+                )
+            if resp.status_code == 404:
+                logger.warning("SAP ADT checkrun returned 404 Not Found")
+                return SAPCheckrunResult(
+                    status=SAPValidationStatus.UNAVAILABLE,
+                    http_status=404,
+                    reason=f"Repository object URI '{repository_uri}' not found in SAP repository (HTTP 404).",
+                )
+
+            logger.warning("SAP ADT checkrun returned unexpected HTTP %d", resp.status_code)
+            return SAPCheckrunResult(
+                status=SAPValidationStatus.UNAVAILABLE,
+                http_status=resp.status_code,
+                reason=f"SAP ADT checkrun returned HTTP status {resp.status_code}.",
+            )
+
+        except httpx.TimeoutException as e:
+            logger.warning("SAP ADT checkrun timed out: %s", self._sanitize_url_for_logging(path))
+            return SAPCheckrunResult(
+                status=SAPValidationStatus.UNAVAILABLE,
+                reason=f"SAP ADT checkrun timed out on {path}: {e}",
+            )
+        except httpx.ConnectError as e:
+            logger.warning("SAP ADT checkrun connection failed: %s", e)
+            return SAPCheckrunResult(
+                status=SAPValidationStatus.UNAVAILABLE,
+                reason=f"Failed to connect to SAP host: {e}",
+            )
+        except Exception as e:
+            logger.warning("Unexpected error during SAP ADT checkrun: %s", e)
+            return SAPCheckrunResult(
+                status=SAPValidationStatus.UNAVAILABLE,
+                reason=f"SAP ADT checkrun encountered unexpected error: {e}",
+            )
 

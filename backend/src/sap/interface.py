@@ -110,11 +110,13 @@ class ISAPConnector(ABC):
     async def validate_cds(
         self,
         view_definition: str,
+        repository_uri: Optional[str] = None,
     ) -> ValidationResult:
-        """Invokes remote SAP ABAP syntax check and CDS validator.
+        """Invokes remote SAP ABAP syntax check and CDS validator via ADT checkruns.
 
         Args:
             view_definition: ABAP CDS DDL source code
+            repository_uri: Optional ADT repository URI (e.g. /sap/bc/adt/ddic/ddl/sources/i_salesorder)
         """
         pass
 

@@ -12,6 +12,7 @@ from src.models.domain import (
     Decision,
     StructuredRequirement,
     TargetUseCase,
+    ValidationResult,
 )
 
 router = APIRouter(prefix="/requirements", tags=["Requirements"])
@@ -34,6 +35,7 @@ class PipelineExecutionResponse(BaseModel):
     evaluated_candidates: List[CandidateEvaluation] = []
     decision: Decision
     cds_draft: Optional[CDSDraft] = None
+    validation_result: Optional[ValidationResult] = None
     generated_code_preview: str = ""
     current_step: str
     audit_events_count: int
@@ -82,6 +84,7 @@ async def analyze_requirement(payload: RequirementCreatePayload):
         evaluated_candidates=final_state.get("evaluated_candidates", []),
         decision=decision,
         cds_draft=final_state.get("cds_draft"),
+        validation_result=final_state.get("validation_result"),
         generated_code_preview=final_state.get("generated_cds_code") or "",
         current_step=final_state.get("current_step", "COMPLETED"),
         audit_events_count=len(final_state.get("audit_logs", [])),

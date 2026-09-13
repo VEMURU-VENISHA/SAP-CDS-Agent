@@ -1,0 +1,338 @@
+﻿"""Milestone 7: Unit and Integration Tests for SAP ADT Checkrun Validation."""
+
+import pytest
+import re
+import httpx
+from unittest.mock import AsyncMock, patch
+
+from src.agents.state import CDSWorkflowState
+from src.agents.validation_agent import ValidationAgent
+from src.config import Settings
+from src.models.domain import (
+    BusinessRequirement,
+    CDSDraft,
+    Decision,
+    DecisionAction,
+    DraftElementType,
+    DraftFieldElement,
+    ElementEvidenceRecord,
+    EvidenceLevel,
+    SAPCheckMessage,
+    SAPCheckrunResult,
+    SAPValidationStatus,
+    TargetUseCase,
+    ValidationResult,
+)
+from src.sap.adt_client import SAPADTClient
+from src.sap.adt_connector import SAPADTConnector
+
+
+def get_mock_settings():
+    return Settings(
+        SAP_BASE_URL="https://sap-dev.corp.internal:44300",
+        SAP_CLIENT="100",
+        SAP_USERNAME="DEVELOPER",
+        SAP_PASSWORD="SuperSecretPassword123!",
+        SAP_AUTH_TYPE="basic",
+        SAP_VERIFY_SSL=False,
+    )
+
+
+# 1. Correct checkrun XML generation
+def test_checkrun_xml_generation():
+    client = SAPADTClient(settings=get_mock_settings())
+    xml = client._build_checkrun_xml("/sap/bc/adt/ddic/ddl/sources/i_salesorder", version="active")
+    assert "<chkrun:checkObjectList" in xml
+    assert 'xmlns:chkrun="http://www.sap.com/adt/checkrun"' in xml
+    assert 'xmlns:adtcore="http://www.sap.com/adt/core"' in xml
+    assert 'adtcore:uri="/sap/bc/adt/ddic/ddl/sources/i_salesorder"' in xml
+    assert 'chkrun:version="active"' in xml
+
+
+# 2. Correct POST path, Content-Type, and Accept header
+@pytest.mark.asyncio
+async def test_checkrun_post_path_and_headers():
+    settings = get_mock_settings()
+    captured_request = None
+
+    def handler(request: httpx.Request):
+        nonlocal captured_request
+        captured_request = request
+        return httpx.Response(
+            200,
+            text="""<?xml version="1.0" encoding="UTF-8"?>
+<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun">
+  <chkrun:checkReport chkrun:reporter="abapCheckRun" chkrun:triggeringuri="/sap/bc/adt/ddic/ddl/sources/i_salesorder" chkrun:status="processed" />
+</chkrun:checkRunReports>""",
+            headers={"Content-Type": "application/vnd.sap.adt.checkmessages+xml; charset=utf-8"},
+        )
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=settings.SAP_BASE_URL)
+    adt_client = SAPADTClient(settings=settings, client=mock_client)
+
+    result = await adt_client.run_checkrun("/sap/bc/adt/ddic/ddl/sources/i_salesorder")
+
+    assert captured_request is not None
+    assert captured_request.method == "POST"
+    assert captured_request.url.path == "/sap/bc/adt/checkruns"
+    assert captured_request.url.query.decode("utf-8") == "reporters=abapCheckRun"
+    assert captured_request.headers["Content-Type"] == "application/vnd.sap.adt.checkobjects+xml"
+    assert captured_request.headers["Accept"] == "application/vnd.sap.adt.checkmessages+xml"
+    assert captured_request.headers["sap-client"] == "100"
+    assert result.status == SAPValidationStatus.PASS
+
+
+# 3. Successful 200 clean pass
+def test_checkrun_200_clean_pass():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun">
+  <chkrun:checkReport chkrun:reporter="abapCheckRun" chkrun:triggeringuri="/sap/bc/adt/ddic/ddl/sources/i_salesorder" chkrun:status="processed">
+  </chkrun:checkReport>
+</chkrun:checkRunReports>"""
+    res = SAPADTClient._parse_checkrun_xml(xml, http_status=200)
+    assert res.status == SAPValidationStatus.PASS
+    assert res.reporter == "abapCheckRun"
+    assert res.triggering_uri == "/sap/bc/adt/ddic/ddl/sources/i_salesorder"
+    assert len(res.messages) == 0
+
+
+# 4. Warning parsing
+def test_checkrun_warning_parsing():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun">
+  <chkrun:checkReport chkrun:reporter="abapCheckRun" chkrun:triggeringuri="/sap/bc/adt/ddic/ddl/sources/i_salesorder" chkrun:status="processed">
+    <chkrun:checkMessage
+      chkrun:uri="/sap/bc/adt/ddic/ddl/sources/i_salesorder#start=14,2"
+      chkrun:type="W"
+      chkrun:shortText="Field NetAmount should have a currency reference annotation"
+      chkrun:msgid="S_CDS"
+      chkrun:msgno="105"
+      chkrun:msgv1="NetAmount"/>
+  </chkrun:checkReport>
+</chkrun:checkRunReports>"""
+    res = SAPADTClient._parse_checkrun_xml(xml, http_status=200)
+    assert res.status == SAPValidationStatus.WARNING
+    assert len(res.messages) == 1
+    msg = res.messages[0]
+    assert msg.severity == "W"
+    assert msg.line == 14
+    assert msg.column == 2
+    assert msg.short_text == "Field NetAmount should have a currency reference annotation"
+    assert msg.msgid == "S_CDS"
+    assert msg.msgno == "105"
+    assert msg.variables == ["NetAmount"]
+
+
+# 5. Error parsing
+def test_checkrun_error_parsing():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun">
+  <chkrun:checkReport chkrun:reporter="abapCheckRun" chkrun:triggeringuri="/sap/bc/adt/ddic/ddl/sources/i_salesorder" chkrun:status="processed">
+    <chkrun:checkMessage
+      chkrun:uri="/sap/bc/adt/ddic/ddl/sources/i_salesorder#start=25,5"
+      chkrun:type="E"
+      chkrun:shortText="Field 'InvalidCol' does not exist in data source"
+      chkrun:msgid="S_CDS"
+      chkrun:msgno="042"
+      chkrun:msgv1="InvalidCol"/>
+  </chkrun:checkReport>
+</chkrun:checkRunReports>"""
+    res = SAPADTClient._parse_checkrun_xml(xml, http_status=200)
+    assert res.status == SAPValidationStatus.ERROR
+    assert len(res.messages) == 1
+    assert res.messages[0].severity == "E"
+    assert res.messages[0].line == 25
+    assert res.messages[0].column == 5
+    assert "InvalidCol" in res.messages[0].short_text
+
+
+# 6. Multiple check messages (Error + Warning + Info)
+def test_checkrun_multiple_check_messages():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun">
+  <chkrun:checkReport chkrun:reporter="abapCheckRun" chkrun:triggeringuri="/sap/bc/adt/ddic/ddl/sources/i_salesorder" chkrun:status="processed">
+    <chkrun:checkMessage chkrun:uri="#start=5,1" chkrun:type="I" chkrun:shortText="Informational note" />
+    <chkrun:checkMessage chkrun:uri="#start=10,2" chkrun:type="W" chkrun:shortText="Deprecated annotation" />
+    <chkrun:checkMessage chkrun:uri="#start=20,4" chkrun:type="E" chkrun:shortText="Syntax error in expression" />
+  </chkrun:checkReport>
+</chkrun:checkRunReports>"""
+    res = SAPADTClient._parse_checkrun_xml(xml, http_status=200)
+    assert res.status == SAPValidationStatus.ERROR
+    assert len(res.messages) == 3
+    severities = [m.severity for m in res.messages]
+    assert severities == ["I", "W", "E"]
+
+
+# 7. Source line and column extraction
+def test_checkrun_source_line_column_extraction():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun">
+  <chkrun:checkReport chkrun:reporter="abapCheckRun">
+    <chkrun:checkMessage chkrun:uri="/path#start=42,15" chkrun:type="W" chkrun:shortText="Pos 1" />
+    <chkrun:checkMessage chkrun:uri="/path#start=88" chkrun:type="W" chkrun:shortText="Pos 2" />
+    <chkrun:checkMessage chkrun:type="W" chkrun:shortText="Pos 3" line="100" offset="4" />
+  </chkrun:checkReport>
+</chkrun:checkRunReports>"""
+    res = SAPADTClient._parse_checkrun_xml(xml, http_status=200)
+    assert res.messages[0].line == 42
+    assert res.messages[0].column == 15
+    assert res.messages[1].line == 88
+    assert res.messages[1].column is None
+    assert res.messages[2].line == 100
+    assert res.messages[2].column == 4
+
+
+# 8. Malformed XML handling
+def test_checkrun_malformed_xml_handling():
+    broken_xml = "<<chkrun:checkRunReports>BROKEN_CLOSING"
+    res = SAPADTClient._parse_checkrun_xml(broken_xml, http_status=200)
+    assert res.status == SAPValidationStatus.ERROR
+    assert "Malformed XML" in (res.reason or "")
+
+
+# 9. HTTP error handling (401, 403, 404, 500)
+@pytest.mark.asyncio
+async def test_checkrun_http_error_handling():
+    settings = get_mock_settings()
+
+    for code in (401, 403, 404, 500):
+        def handler(request: httpx.Request):
+            return httpx.Response(code, text=f"Error {code}")
+
+        mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=settings.SAP_BASE_URL)
+        adt_client = SAPADTClient(settings=settings, client=mock_client)
+        result = await adt_client.run_checkrun("/sap/bc/adt/ddic/ddl/sources/i_salesorder")
+
+        assert result.status == SAPValidationStatus.UNAVAILABLE
+        assert result.http_status == code
+
+
+# 10. Timeout handling
+@pytest.mark.asyncio
+async def test_checkrun_timeout_handling():
+    settings = get_mock_settings()
+
+    def handler(request: httpx.Request):
+        raise httpx.TimeoutException("Connection timed out")
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=settings.SAP_BASE_URL)
+    adt_client = SAPADTClient(settings=settings, client=mock_client)
+    result = await adt_client.run_checkrun("/sap/bc/adt/ddic/ddl/sources/i_salesorder")
+
+    assert result.status == SAPValidationStatus.UNAVAILABLE
+    assert "timed out" in (result.reason or "")
+
+
+# 11. Unconfigured SAP handling
+@pytest.mark.asyncio
+async def test_checkrun_unconfigured_sap():
+    settings = Settings(SAP_BASE_URL="")  # Empty URL
+    adt_client = SAPADTClient(settings=settings)
+    result = await adt_client.run_checkrun("/sap/bc/adt/ddic/ddl/sources/i_salesorder")
+
+    assert result.status == SAPValidationStatus.UNAVAILABLE
+    assert "configuration error" in (result.reason or "")
+
+
+# 12. Unpersisted draft returns UNAVAILABLE
+@pytest.mark.asyncio
+async def test_unpersisted_draft_returns_unavailable():
+    connector = SAPADTConnector(settings=get_mock_settings())
+    # No repository_uri passed (in-memory unpersisted draft)
+    val_res = await connector.validate_cds(view_definition="define view entity ZC_Test as select from ...", repository_uri=None)
+
+    assert val_res.sap_validation_status == SAPValidationStatus.UNAVAILABLE
+    assert "Unpersisted Draft" in (val_res.sap_checkrun_reason or "")
+    assert "requires a repository object URI" in (val_res.sap_checkrun_reason or "")
+
+
+# 13. ValidationAgent fails when SAP checkrun returns ERROR
+@pytest.mark.asyncio
+async def test_validation_agent_fails_on_sap_error():
+    connector = AsyncMock(spec=SAPADTConnector)
+    connector.is_connected.return_value = True
+
+    err_msg = SAPCheckMessage(severity="E", line=10, short_text="Syntax error in DDL source")
+    checkrun_res = SAPCheckrunResult(
+        status=SAPValidationStatus.ERROR,
+        messages=[err_msg],
+        triggering_uri="/sap/bc/adt/ddic/ddl/sources/i_salesorder",
+    )
+    connector.validate_cds.return_value = ValidationResult(
+        is_valid=False,
+        syntax_errors=["SAP Compiler Error (Line 10): Syntax error in DDL source"],
+        sap_validation_status=SAPValidationStatus.ERROR,
+        sap_checkrun_result=checkrun_res,
+        sap_checkrun_reason="SAP compiler errors detected.",
+    )
+
+    agent = ValidationAgent(connector=connector)
+
+    req = BusinessRequirement(
+        title="Sales Analysis",
+        description="Standard order analysis",
+        business_domain="Sales",
+        target_use_case=TargetUseCase.ANALYTICAL_REPORT,
+    )
+    decision = Decision(
+        requirement_id=req.id,
+        action=DecisionAction.REUSE,
+        recommended_view="I_SalesOrder",
+        confidence_score=1.0,
+        fit_percentage=100.0,
+        rationale="Standard reuse",
+        missing_fields=[],
+        tradeoffs=[],
+        human_approval_required=False,
+        is_approved=True,
+    )
+    draft = CDSDraft(
+        requirement_id=req.id,
+        decision_action=DecisionAction.REUSE,
+        object_name="I_SalesOrder",
+        object_type="REUSE_PROPOSAL",
+        ddl_source="SELECT * FROM I_SalesOrder;",
+        source_views=["I_SalesOrder"],
+    )
+
+    state: CDSWorkflowState = {
+        "requirement": req,
+        "decision": decision,
+        "cds_draft": draft,
+        "generated_cds_code": draft.ddl_source,
+        "candidates": [],
+        "audit_logs": [],
+        "errors": [],
+        "current_step": "VALIDATION",
+    }
+
+    final_state = await agent.run(state)
+    val = final_state.get("validation_result")
+    assert val is not None
+    assert val.is_valid is False
+    assert val.sap_validation_status == SAPValidationStatus.ERROR
+    assert len(val.syntax_errors) > 0
+    assert final_state["cds_draft"].generation_status == "REJECTED"
+
+
+# 14. No secret leakage in logs
+def test_no_secret_leakage_in_logs():
+    client = SAPADTClient(settings=get_mock_settings())
+    sanitized = client._sanitize_url_for_logging("/sap/bc/adt/checkruns?token=SecretToken123&password=MyPassword")
+    assert "SecretToken123" not in sanitized
+    assert "MyPassword" not in sanitized
+    assert "token=***" in sanitized
+    assert "password=***" in sanitized
+
+
+# 15. Guaranteed write refusal
+@pytest.mark.asyncio
+async def test_no_sap_write_operations_in_checkrun():
+    connector = SAPADTConnector(settings=get_mock_settings())
+    with pytest.raises(Exception) as exc_create:
+        await connector.create_cds_draft("Z_Test", "view def", "Z_PKG", "TR123")
+    assert "disabled" in str(exc_create.value).lower() or "read_only" in str(exc_create.value).lower()
+
+    with pytest.raises(Exception) as exc_act:
+        await connector.activate_cds("Z_Test", "TR123")
+    assert "disabled" in str(exc_act.value).lower() or "read_only" in str(exc_act.value).lower()

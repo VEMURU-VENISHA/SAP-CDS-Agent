@@ -5,13 +5,14 @@ import { MetricCards } from './components/dashboard/MetricCards';
 import { RecentPipelines } from './components/dashboard/RecentPipelines';
 import { StudioPreview } from './components/dashboard/StudioPreview';
 import { fetchHealth } from './services/api';
-import { HealthStatus, PipelineResult, CDSDraft } from './types';
+import { HealthStatus, PipelineResult, CDSDraft, ValidationResult } from './types';
 
 export function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [latestDraft, setLatestDraft] = useState<CDSDraft | null>(null);
+  const [latestValidation, setLatestValidation] = useState<ValidationResult | null>(null);
 
   // Dynamic session metrics tracking actual user executions only
   const [metrics, setMetrics] = useState({
@@ -46,6 +47,9 @@ export function App() {
   const handlePipelineExecuted = (result: PipelineResult) => {
     if (result.cds_draft) {
       setLatestDraft(result.cds_draft);
+    }
+    if (result.validation_result) {
+      setLatestValidation(result.validation_result);
     }
     setMetrics((prev) => ({
       totalPipelines: prev.totalPipelines + 1,
@@ -83,7 +87,7 @@ export function App() {
           />
 
           {/* Data Model Visualization & Monaco CDS Preview */}
-          <StudioPreview cdsDraft={latestDraft} />
+          <StudioPreview cdsDraft={latestDraft} validationResult={latestValidation} />
         </main>
       </div>
     </div>

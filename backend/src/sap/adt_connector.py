@@ -13,7 +13,7 @@ from typing import List, Optional
 from src.config import Settings, get_settings
 from src.core.exceptions import SAPConnectorError, SAPNotFoundError
 from src.logging_config import logger
-from src.models.domain import CDSCandidate, CDSLayer, ValidationResult
+from src.models.domain import CDSCandidate, CDSLayer, SAPCheckrunResult, SAPValidationStatus, ValidationResult
 from src.sap.adt_client import SAPADTClient
 from src.sap.interface import ISAPConnector
 from src.sap.models import (
@@ -177,13 +177,91 @@ class SAPADTConnector(ISAPConnector):
     async def validate_cds(
         self,
         view_definition: str,
+        repository_uri: Optional[str] = None,
     ) -> ValidationResult:
-        """Intentionally deferred in Milestone 3 (Read-only discovery mode)."""
-        logger.warning("Attempted 'validate_cds' in read-only discovery mode.")
-        raise SAPConnectorError(
-            message="Operation 'validate_cds' is deferred to Milestone 4.",
-            code="SAP_READ_ONLY_MODE",
-            status_code=403,
+        """Validates CDS view entity using verified SAP ADT checkrun endpoint.
+
+        Rule:
+        - For existing repository objects (e.g. /sap/bc/adt/ddic/ddl/sources/i_salesorder),
+          executes real read-only checkrun: POST /sap/bc/adt/checkruns?reporters=abapCheckRun
+        - For unpersisted drafts without a repository URI:
+          returns UNAVAILABLE with reason 'Unpersisted Draft — SAP ADT checkrun requires a repository object URI.'
+          Zero SAP write operations or draft creations are performed.
+        """
+        if not repository_uri or not repository_uri.strip():
+            return ValidationResult(
+                is_valid=True,
+                syntax_errors=[],
+                naming_convention_violations=[],
+                clean_core_compliance_score=100.0,
+                governance_warnings=[],
+                details=[
+                    {
+                        "check": "SAP ADT Remote Checkrun",
+                        "passed": False,
+                        "detail": "Unpersisted Draft — SAP ADT checkrun requires a repository object URI.",
+                    },
+                ],
+                sap_validation_status=SAPValidationStatus.UNAVAILABLE,
+                sap_checkrun_reason="Unpersisted Draft — SAP ADT checkrun requires a repository object URI.",
+            )
+
+        checkrun_result = await self.client.run_checkrun(repository_uri.strip())
+
+        syntax_errors = []
+        governance_warnings = []
+        details = []
+
+        if checkrun_result.status == SAPValidationStatus.PASS:
+            is_valid = True
+            details.append({
+                "check": "SAP ADT Remote Checkrun",
+                "passed": True,
+                "detail": "All SAP ABAP syntax and compiler checks passed cleanly.",
+            })
+        elif checkrun_result.status == SAPValidationStatus.WARNING:
+            is_valid = True
+            for m in checkrun_result.messages:
+                loc = f"Line {m.line}" if m.line else "Header"
+                governance_warnings.append(f"SAP Compiler Warning ({loc}): {m.short_text}")
+            details.append({
+                "check": "SAP ADT Remote Checkrun",
+                "passed": True,
+                "detail": f"SAP returned {len(checkrun_result.messages)} compiler warnings.",
+            })
+        elif checkrun_result.status == SAPValidationStatus.ERROR:
+            is_valid = False
+            for m in checkrun_result.messages:
+                if m.severity in ("E", "A"):
+                    loc = f"Line {m.line}" if m.line else "General"
+                    syntax_errors.append(f"SAP Compiler Error ({loc}): {m.short_text}")
+                elif m.severity == "W":
+                    loc = f"Line {m.line}" if m.line else "General"
+                    governance_warnings.append(f"SAP Compiler Warning ({loc}): {m.short_text}")
+            details.append({
+                "check": "SAP ADT Remote Checkrun",
+                "passed": False,
+                "detail": f"SAP returned {len(syntax_errors)} blocking syntax/compiler errors.",
+            })
+        else:
+            # UNAVAILABLE or INSUFFICIENT_EVIDENCE
+            is_valid = True
+            details.append({
+                "check": "SAP ADT Remote Checkrun",
+                "passed": False,
+                "detail": checkrun_result.reason or "SAP checkrun unavailable.",
+            })
+
+        return ValidationResult(
+            is_valid=is_valid,
+            syntax_errors=syntax_errors,
+            naming_convention_violations=[],
+            clean_core_compliance_score=100.0 if is_valid else 0.0,
+            governance_warnings=governance_warnings,
+            details=details,
+            sap_validation_status=checkrun_result.status,
+            sap_checkrun_result=checkrun_result,
+            sap_checkrun_reason=checkrun_result.reason,
         )
 
     async def activate_cds(

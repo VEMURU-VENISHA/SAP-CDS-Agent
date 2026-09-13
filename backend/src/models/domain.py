@@ -218,6 +218,40 @@ class DataModel(BaseModel):
     )
 
 
+class SAPValidationStatus(str, Enum):
+    PASS = "PASS"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    UNAVAILABLE = "UNAVAILABLE"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+
+
+class SAPCheckMessage(BaseModel):
+    """Individual compiler message or warning returned by SAP ADT checkrun."""
+
+    uri: Optional[str] = Field(default=None, description="ADT URI with position fragment (e.g. #start=line,offset)")
+    severity: str = Field(..., description="Message severity: 'E' (Error), 'W' (Warning), 'I' (Info), 'A' (Abort)")
+    short_text: str = Field(..., description="Compiler message short text")
+    msgid: Optional[str] = Field(default=None, description="ABAP message class ID")
+    msgno: Optional[str] = Field(default=None, description="ABAP message number")
+    variables: List[str] = Field(default_factory=list, description="Message variables (msgv1..msgv4)")
+    line: Optional[int] = Field(default=None, description="Source line number (1-indexed)")
+    column: Optional[int] = Field(default=None, description="Source column or offset")
+    raw_safe_metadata: Optional[Dict[str, Any]] = Field(default=None, description="Sanitized safe metadata")
+
+
+class SAPCheckrunResult(BaseModel):
+    """Aggregate result of remote SAP ADT checkrun execution."""
+
+    status: SAPValidationStatus = Field(default=SAPValidationStatus.UNAVAILABLE, description="Overall SAP validation outcome")
+    reporter: Optional[str] = Field(default="abapCheckRun", description="ADT reporter identifier")
+    triggering_uri: Optional[str] = Field(default=None, description="Target object ADT URI that was checked")
+    messages: List[SAPCheckMessage] = Field(default_factory=list, description="List of check messages returned")
+    http_status: Optional[int] = Field(default=None, description="HTTP status code from ADT checkrun response")
+    content_type: Optional[str] = Field(default=None, description="Content-Type header from ADT response")
+    reason: Optional[str] = Field(default=None, description="Explanatory text when status is UNAVAILABLE or INSUFFICIENT_EVIDENCE")
+
+
 class ValidationResult(BaseModel):
     """Syntactic, clean-core, and governance validation check result."""
 
@@ -235,6 +269,18 @@ class ValidationResult(BaseModel):
     )
     governance_warnings: List[str] = Field(default_factory=list, description="Non-blocking architectural warnings")
     details: List[Dict[str, Any]] = Field(default_factory=list, description="Itemized validation checks")
+    sap_validation_status: SAPValidationStatus = Field(
+        default=SAPValidationStatus.UNAVAILABLE,
+        description="Outcome of remote SAP ADT checkrun",
+    )
+    sap_checkrun_result: Optional[SAPCheckrunResult] = Field(
+        default=None,
+        description="Structured result from SAP ADT checkrun endpoint",
+    )
+    sap_checkrun_reason: Optional[str] = Field(
+        default=None,
+        description="Human-readable justification for SAP validation status",
+    )
 
 
 class DeploymentRequest(BaseModel):
@@ -327,6 +373,7 @@ class CDSDraft(BaseModel):
     warnings: List[str] = Field(default_factory=list, description="Design warnings, unsupported assumptions, or evidence gaps")
     validation_errors: List[str] = Field(default_factory=list, description="Static validation errors")
     generation_status: str = Field(default="GENERATED", description="GENERATED, VALIDATED, INSUFFICIENT_EVIDENCE, REJECTED")
+    sap_validation_status: Optional[SAPValidationStatus] = Field(default=None, description="Outcome of remote SAP ADT checkrun")
     unresolved_items: List[str] = Field(default_factory=list, description="Requested concepts that could not be verified")
     created_at: datetime = Field(default_factory=utc_now)
 

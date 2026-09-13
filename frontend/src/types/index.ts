@@ -158,6 +158,47 @@ export interface DraftParameterElement {
   evidence: ElementEvidenceRecord;
 }
 
+export type SAPValidationStatus =
+  | 'PASS'
+  | 'WARNING'
+  | 'ERROR'
+  | 'UNAVAILABLE'
+  | 'INSUFFICIENT_EVIDENCE';
+
+export interface SAPCheckMessage {
+  uri?: string;
+  severity: string;
+  short_text: string;
+  msgid?: string;
+  msgno?: string;
+  variables: string[];
+  line?: number;
+  column?: number;
+  raw_safe_metadata?: Record<string, any>;
+}
+
+export interface SAPCheckrunResult {
+  status: SAPValidationStatus;
+  reporter?: string;
+  triggering_uri?: string;
+  messages: SAPCheckMessage[];
+  http_status?: number;
+  content_type?: string;
+  reason?: string;
+}
+
+export interface ValidationResult {
+  is_valid: boolean;
+  syntax_errors: string[];
+  naming_convention_violations: string[];
+  clean_core_compliance_score: number;
+  governance_warnings: string[];
+  details: Array<{ check: string; passed: boolean; detail: string }>;
+  sap_validation_status?: SAPValidationStatus;
+  sap_checkrun_result?: SAPCheckrunResult;
+  sap_checkrun_reason?: string;
+}
+
 export interface CDSDraft {
   id: string;
   requirement_id: string;
@@ -176,6 +217,7 @@ export interface CDSDraft {
   warnings: string[];
   validation_errors: string[];
   generation_status: string;
+  sap_validation_status?: SAPValidationStatus;
   unresolved_items: string[];
   created_at: string;
 }
@@ -187,6 +229,7 @@ export interface PipelineResult {
   decision: Decision;
   generated_code_preview: string;
   cds_draft?: CDSDraft;
+  validation_result?: ValidationResult;
   current_step: string;
   audit_events_count: number;
 }
