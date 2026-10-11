@@ -64,6 +64,18 @@ class Settings(BaseSettings):
         default=False,
         description="Explicit opt-in flag required to un-skip live integration test suite.",
     )
+    SAP_DEV_WRITE_ENABLED: bool = Field(
+        default=False,
+        description="Explicit opt-in flag required for controlled SAP DEV write operations (Milestone 13).",
+    )
+    SAP_CREATION_TEST_BYPASS_VALIDATION: bool = Field(
+        default=False,
+        description="Explicit opt-in flag for testing bypass of validation gates.",
+    )
+    SAP_DEV_PACKAGE: str = Field(
+        default="ZTRAINING_2026",
+        description="Target SAP ABAP package for controlled CDS creation in DEV.",
+    )
 
     # SAP ADT Network & Auth Settings
     SAP_BASE_URL: str = Field(
@@ -102,6 +114,11 @@ class Settings(BaseSettings):
         default=15,
         description="HTTP request timeout in seconds for SAP ADT calls",
     )
+
+    # Gemini semantic mapping (API key must come from environment/.env)
+    GEMINI_API_KEY: SecretStr = Field(default=SecretStr(""), description="Gemini API key")
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_TIMEOUT_SECONDS: int = 20
 
     # Agent Orchestration Settings
     AGENT_MAX_ITERATIONS: int = 10

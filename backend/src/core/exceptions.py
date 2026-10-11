@@ -106,12 +106,15 @@ class SAPAuthenticationError(SAPConnectorError):
 class SAPPermissionError(SAPConnectorError):
     """Raised when SAP user lacks authorization for the requested ADT resource (HTTP 403)."""
 
-    def __init__(self, resource: str = ""):
+    def __init__(self, resource: str = "", details: Optional[Dict[str, Any]] = None):
+        merged = {"resource": resource, "status": 403}
+        if details:
+            merged.update(details)
         super().__init__(
             message=f"Access forbidden to SAP ADT resource '{resource}'. Check authorization profile S_ADT_RES.",
             code="SAP_PERMISSION_DENIED",
             status_code=403,
-            details={"resource": resource, "status": 403},
+            details=merged,
         )
 
 
@@ -124,6 +127,18 @@ class SAPNotFoundError(SAPConnectorError):
             code="SAP_RESOURCE_NOT_FOUND",
             status_code=404,
             details={"resource": resource_name, "status": 404},
+        )
+
+
+class SAPConflictError(SAPConnectorError):
+    """Raised when attempting to create a CDS object that already exists in the SAP repository (HTTP 409)."""
+
+    def __init__(self, resource_name: str, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=f"SAP CDS object '{resource_name}' already exists in SAP target repository. Overwrite prevented.",
+            code="SAP_OBJECT_ALREADY_EXISTS",
+            status_code=409,
+            details=details or {"resource": resource_name, "status": 409},
         )
 
 
@@ -147,6 +162,18 @@ class SAPSecurityError(SAPConnectorError):
             message=message,
             code="SAP_SECURITY_VIOLATION",
             status_code=403,
+            details=details,
+        )
+
+
+class SAPTransportRequestError(SAPConnectorError, ValueError):
+    """Raised when a CTS Workbench Transport Request is missing, empty, or malformed."""
+
+    def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="SAP_INVALID_TRANSPORT_REQUEST",
+            status_code=400,
             details=details,
         )
 

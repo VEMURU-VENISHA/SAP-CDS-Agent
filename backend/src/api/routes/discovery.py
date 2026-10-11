@@ -4,7 +4,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Query
 from src.models.domain import CDSCandidate, CDSLayer
 from src.sap.connector import get_sap_connector
-from src.sap.models import SAPSystemInfo
+from src.sap.models import SAPSystemInfo, CDSMetadata
 
 router = APIRouter(prefix="/discovery", tags=["SAP Discovery"])
 
@@ -34,3 +34,107 @@ async def search_cds_views(
     connector = get_sap_connector()
     # In Milestone 1, this raises SAPNotConnectedError
     return await connector.search_cds(query=q, package=package, layer=layer)
+
+
+@router.get(
+    "/view/{view_name}",
+    response_model=CDSMetadata,
+    summary="Returns complete verified metadata for one CDS view",
+)
+async def get_cds_view_metadata(view_name: str):
+    connector = get_sap_connector()
+    return await connector.get_cds_metadata(view_name)
+
+
+from pydantic import BaseModel
+from src.services.discovery_service import CDSDiscoveryService
+
+discovery_svc = CDSDiscoveryService()
+
+
+class DiscoveryRunPayload(BaseModel):
+    requirement: str
+    required_fields: List[dict]
+    search_mode: str = "fast"
+    use_cache: bool = True
+    selected_domains: Optional[List[str]] = None
+
+
+@router.get("/metadata-status", summary="Gets real metadata index status and connection stats")
+async def get_metadata_status():
+    return discovery_svc.get_metadata_status()
+
+
+@router.post("/refresh-metadata", summary="Refreshes local index from live SAP ADT")
+async def refresh_metadata():
+    return await discovery_svc.refresh_metadata()
+
+
+@router.get("/direct-search", summary="Direct search across indexed CDS views")
+async def direct_search(q: str = Query(..., min_length=1)):
+    return await discovery_svc.direct_search(q)
+
+
+@router.get("/view-details/{view_name}", summary="Full details for one CDS view")
+async def get_view_details_full(view_name: str):
+    details = await discovery_svc.get_view_details(view_name)
+    if not details:
+        return {
+            "cds_name": view_name,
+            "description": "Not available from current ADT metadata.",
+            "domain": "Cross-Application / Core",
+            "grain": "Entity",
+            "source_type": "CDS View Entity",
+            "package": "SAP_STANDARD",
+            "fields": [],
+            "keys": [],
+            "associations": [],
+            "joins": [],
+            "odata_available": False,
+            "odata_status": "Unknown",
+            "odata_annotation": "Not available from current ADT metadata.",
+        }
+    return details
+
+
+@router.get("/source/{view_name}", summary="Fetches genuine DDL source from SAP ADT with field tracing and status")
+async def get_live_cds_source(
+    view_name: str,
+    fields: Optional[str] = Query(None, description="Optional comma-separated list of required fields to trace against DDL source"),
+):
+    field_list = [f.strip() for f in fields.split(",") if f.strip()] if fields else None
+    return await discovery_svc.get_view_source_details(view_name, requested_fields=field_list)
+
+
+@router.post("/run", summary="Run complete un-truncated discovery with single and multi-CDS validation")
+async def run_discovery_pipeline(payload: DiscoveryRunPayload):
+    return await discovery_svc.run_discovery(
+        requirement_text=payload.requirement,
+        required_fields=payload.required_fields,
+        search_mode=payload.search_mode,
+        use_cache=payload.use_cache,
+        selected_domains=payload.selected_domains,
+    )
+
+
+class IncrementalSyncPayload(BaseModel):
+    prefixes: Optional[List[str]] = None
+    max_per_prefix: int = 100
+
+
+@router.get("/preview/{view_name}", summary="Fetches live data preview records for a CDS view from SAP ADT")
+async def get_cds_data_preview(
+    view_name: str,
+    max_rows: int = Query(10, ge=1, le=50, description="Max rows to preview"),
+):
+    """Executes read-only live data preview query on target CDS view."""
+    return await discovery_svc.get_data_preview(cds_name=view_name, max_rows=max_rows)
+
+
+@router.post("/sync-incremental", summary="Incrementally syncs custom/recently modified CDS objects from SAP DEV")
+async def sync_incremental_endpoint(payload: Optional[IncrementalSyncPayload] = None):
+    pfx = payload.prefixes if payload else None
+    max_pfx = payload.max_per_prefix if payload else 100
+    return await discovery_svc.sync_incremental(prefixes=pfx, max_per_prefix=max_pfx)
+
+

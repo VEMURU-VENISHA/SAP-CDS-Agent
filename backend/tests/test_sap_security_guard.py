@@ -20,6 +20,7 @@ def get_secure_settings(**kwargs):
         "SAP_VERIFY_SSL": True,
         "SAP_LIVE_READ_ONLY": False,
         "SAP_LIVE_TEST_ENABLED": False,
+        "SAP_DEV_WRITE_ENABLED": False,
         "SAP_SEND_CLIENT_PARAM": False,
     }
     default_args.update(kwargs)

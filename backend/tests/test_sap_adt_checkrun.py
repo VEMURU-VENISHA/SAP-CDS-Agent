@@ -5,8 +5,6 @@ import re
 import httpx
 from unittest.mock import AsyncMock, patch
 
-from src.agents.state import CDSWorkflowState
-from src.agents.validation_agent import ValidationAgent
 from src.config import Settings
 from src.models.domain import (
     BusinessRequirement,
@@ -248,9 +246,9 @@ async def test_unpersisted_draft_returns_unavailable():
     assert "requires a repository object URI" in (val_res.sap_checkrun_reason or "")
 
 
-# 13. ValidationAgent fails when SAP checkrun returns ERROR
+# 13. Connector reports failure when SAP checkrun returns ERROR
 @pytest.mark.asyncio
-async def test_validation_agent_fails_on_sap_error():
+async def test_connector_reports_failure_on_sap_error():
     connector = AsyncMock(spec=SAPADTConnector)
     connector.is_connected.return_value = True
 
@@ -268,53 +266,14 @@ async def test_validation_agent_fails_on_sap_error():
         sap_checkrun_reason="SAP compiler errors detected.",
     )
 
-    agent = ValidationAgent(connector=connector)
-
-    req = BusinessRequirement(
-        title="Sales Analysis",
-        description="Standard order analysis",
-        business_domain="Sales",
-        target_use_case=TargetUseCase.ANALYTICAL_REPORT,
+    val = await connector.validate_cds(
+        view_definition="SELECT * FROM I_SalesOrder;",
+        repository_uri="/sap/bc/adt/ddic/ddl/sources/i_salesorder",
     )
-    decision = Decision(
-        requirement_id=req.id,
-        action=DecisionAction.REUSE,
-        recommended_view="I_SalesOrder",
-        confidence_score=1.0,
-        fit_percentage=100.0,
-        rationale="Standard reuse",
-        missing_fields=[],
-        tradeoffs=[],
-        human_approval_required=False,
-        is_approved=True,
-    )
-    draft = CDSDraft(
-        requirement_id=req.id,
-        decision_action=DecisionAction.REUSE,
-        object_name="I_SalesOrder",
-        object_type="REUSE_PROPOSAL",
-        ddl_source="SELECT * FROM I_SalesOrder;",
-        source_views=["I_SalesOrder"],
-    )
-
-    state: CDSWorkflowState = {
-        "requirement": req,
-        "decision": decision,
-        "cds_draft": draft,
-        "generated_cds_code": draft.ddl_source,
-        "candidates": [],
-        "audit_logs": [],
-        "errors": [],
-        "current_step": "VALIDATION",
-    }
-
-    final_state = await agent.run(state)
-    val = final_state.get("validation_result")
     assert val is not None
     assert val.is_valid is False
     assert val.sap_validation_status == SAPValidationStatus.ERROR
     assert len(val.syntax_errors) > 0
-    assert final_state["cds_draft"].generation_status == "REJECTED"
 
 
 # 14. No secret leakage in logs

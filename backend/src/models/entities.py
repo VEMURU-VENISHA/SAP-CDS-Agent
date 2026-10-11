@@ -1,6 +1,8 @@
 """SQLAlchemy ORM Entities for persisted domain data."""
 
-from sqlalchemy import Boolean, Float, String, Text, JSON
+from datetime import datetime
+from typing import Optional
+from sqlalchemy import Boolean, DateTime, Float, String, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 from src.db.base import Base, AuditMixin
 
@@ -47,3 +49,23 @@ class AuditLogEntity(Base, AuditMixin):
     actor: Mapped[str] = mapped_column(String(100), nullable=False)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     ip_address: Mapped[str] = mapped_column(String(50), nullable=True)
+
+
+class ReviewPackageEntity(Base, AuditMixin):
+    """Stores synthesized CDS review packages with full state and audit trails."""
+
+    __tablename__ = "review_packages"
+
+    requirement_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    decision_id: Mapped[Optional[str]] = mapped_column(String(36), index=True, nullable=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING_REVIEW")
+    reviewer: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    review_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    review_timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    can_approve: Mapped[bool] = mapped_column(Boolean, default=False)
+    decision_action: Mapped[str] = mapped_column(String(50), nullable=False)
+    object_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    transport_request: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    package_data: Mapped[dict] = mapped_column(JSON, nullable=False)
+    state_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+

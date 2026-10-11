@@ -1,5 +1,4 @@
 import React from 'react';
-import { Server, AlertTriangle } from 'lucide-react';
 import { HealthStatus } from '../../types';
 
 interface HeaderProps {
@@ -8,63 +7,75 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ health, loading }) => {
+  const isAdtConnected = health?.sap_connector?.is_connected ?? false;
+  const isBackendOnline = health?.status === 'healthy';
+  const systemId = health?.sap_connector?.system_id || 'DEV';
+  const clientId = health?.sap_connector?.client || '100';
+
   return (
-    <header className="h-16 bg-gray-900/80 backdrop-blur border-b border-gray-800 flex items-center justify-between px-6 z-10 sticky top-0">
+    <header className="h-16 bg-white border-b border-[#D9E4F0] flex items-center justify-between px-6 z-10 sticky top-0 shadow-xs">
+      {/* Title and Logo */}
       <div className="flex items-center space-x-3">
-        <div className="h-9 w-9 rounded-lg bg-blue-600/20 border border-blue-500/40 flex items-center justify-center text-blue-400 font-bold text-lg shadow-sm">
+        <div className="h-9 w-9 rounded-lg bg-[#0A6ED1] text-white flex items-center justify-center font-bold text-base shadow-sm">
           ⚡
         </div>
         <div>
-          <h1 className="text-base font-semibold text-gray-100 leading-tight">
-            SAP CDS Intelligence & Automation Platform
+          <h1 className="text-sm font-bold text-[#0F2747] leading-none">
+            SAP CDS Intelligence Agent
           </h1>
-          <p className="text-xs text-gray-400">
-            Target System:{' '}
-            <span className="text-blue-400 font-mono">
-              {health?.sap_connector?.system_id ?? 'DEV'} (Client {health?.sap_connector?.client ?? '100'})
-            </span>{' '}
-            | Mode:{' '}
-            <span className="text-amber-400 font-mono">
-              {health?.sap_connector?.status ?? 'Unconnected (Guarded)'}
-            </span>
+          <p className="text-[11px] text-[#5F7187] font-medium mt-1">
+            Clean Core VDM Discovery &amp; Automated ABAP Creation
           </p>
         </div>
       </div>
 
-      <div className="flex items-center space-x-4">
-        {/* Guardrail badge */}
-        <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-300 border border-amber-500/30">
-          <AlertTriangle className="w-3.5 h-3.5" />
-          <span>Milestone 1: Unconnected Guardrail Active</span>
+      {/* Target System & Status Badges */}
+      <div className="flex items-center space-x-3 text-xs">
+        {/* Environment badge */}
+        <div className="px-3 py-1.5 rounded-lg bg-[#F4F8FC] border border-[#D9E4F0] text-[#172B4D] font-medium flex items-center gap-1.5">
+          <span className="text-[#5F7187]">Environment:</span>
+          <span className="text-[#0A6ED1] font-mono font-semibold">
+            SAP S/4HANA {systemId} Client {clientId}
+          </span>
+        </div>
+
+        {/* SAP ADT Status badge */}
+        <div
+          className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border font-medium transition ${
+            isAdtConnected
+              ? 'bg-[#E8F8F3] text-[#00A878] border-[#00A878]/30'
+              : 'bg-amber-50 text-amber-700 border-amber-300'
+          }`}
+        >
+          <span
+            className={`w-2 h-2 rounded-full inline-block ${
+              isAdtConnected ? 'bg-[#00A878] animate-pulse' : 'bg-amber-500'
+            }`}
+          />
+          <span>{isAdtConnected ? 'SAP ADT Connected' : 'SAP ADT Guardrail Mode'}</span>
         </div>
 
         {/* Backend health status indicator */}
-        <div className="flex items-center space-x-2 px-3 py-1 rounded-md bg-gray-800/80 border border-gray-700 text-xs">
-          <Server className="w-3.5 h-3.5 text-gray-400" />
-          <span className="text-gray-400">Backend:</span>
+        <div className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-[#F4F8FC] border border-[#D9E4F0] font-medium">
+          <span className="text-[#5F7187]">Backend</span>
           {loading ? (
-            <span className="text-gray-500 animate-pulse">Checking...</span>
-          ) : health?.status === 'healthy' ? (
-            <span className="flex items-center text-emerald-400 font-medium">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block mr-1.5 animate-pulse"></span>
-              Online (v{health.version})
+            <span className="text-[#5F7187] animate-pulse">Checking...</span>
+          ) : isBackendOnline ? (
+            <span className="flex items-center text-[#00A878]">
+              <span className="w-2 h-2 rounded-full bg-[#00A878] inline-block mr-1.5 animate-pulse" />
+              Online
             </span>
           ) : (
-            <span className="text-red-400 font-medium">Offline</span>
+            <span className="flex items-center text-red-600">
+              <span className="w-2 h-2 rounded-full bg-red-600 inline-block mr-1.5" />
+              Offline
+            </span>
           )}
-        </div>
-
-        {/* User profile avatar */}
-        <div className="flex items-center space-x-2 border-l border-gray-800 pl-4">
-          <div className="h-8 w-8 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white text-xs font-semibold">
-            AD
-          </div>
-          <div className="text-left hidden md:block">
-            <div className="text-xs font-medium text-gray-200">ABAP Lead Architect</div>
-            <div className="text-[10px] text-gray-400">Role: Reviewer</div>
-          </div>
         </div>
       </div>
     </header>
   );
 };
+
+export default Header;
+

@@ -28,6 +28,9 @@ wheels/
 htmlcov/
 *.sqlite3
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 
 # Node.js / Vite
 node_modules/

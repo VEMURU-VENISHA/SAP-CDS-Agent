@@ -19,9 +19,3 @@ class UserContext(BaseModel):
     user_id: str = Field(..., description="Unique user identifier (e.g. employee ID or email)")
     roles: List[UserRole] = Field(default_factory=lambda: [UserRole.DEVELOPER])
     sap_user_alias: Optional[str] = Field(default=None, description="Optional SAP Developer user ID for ADT assignment")
-
-    def has_role(self, role: UserRole) -> bool:
-        return role in self.roles or UserRole.ADMIN in self.roles
-
-    def can_approve_deployments(self) -> bool:
-        return any(r in self.roles for r in [UserRole.SENIOR_DEVELOPER, UserRole.ARCHITECT, UserRole.ADMIN])

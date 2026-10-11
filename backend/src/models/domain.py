@@ -13,6 +13,7 @@ Contains core Pydantic domain models:
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
+from typing_extensions import TypedDict
 import uuid
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -64,6 +65,14 @@ class DecisionAction(str, Enum):
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"  # Ambiguous/incomplete metadata halts decision
 
 
+class CDSConstructType(str, Enum):
+    """Authoritative base CDS construct type verified from DDL source or SAP metadata."""
+
+    CLASSIC_VIEW = "CLASSIC_VIEW"  # define view ... (classic CDS view requiring extend view with <name>)
+    VIEW_ENTITY = "VIEW_ENTITY"    # define view entity ... (modern CDS view entity requiring extend view entity with)
+    UNKNOWN = "UNKNOWN"            # Unverified construct type; must halt with INSUFFICIENT_EVIDENCE
+
+
 
 class DeploymentStatus(str, Enum):
     DRAFT = "DRAFT"
@@ -73,6 +82,13 @@ class DeploymentStatus(str, Enum):
     DRAFT_CREATED = "DRAFT_CREATED"
     ACTIVATED = "ACTIVATED"
     FAILED = "FAILED"
+
+
+class ReviewStatus(str, Enum):
+    PENDING_REVIEW = "PENDING_REVIEW"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
 
 
 # ==============================================================================
@@ -114,6 +130,21 @@ class CDSCandidate(BaseModel):
     available_fields: List[str] = Field(default_factory=list, description="Key and data elements available in the candidate")
     key_fields: List[str] = Field(default_factory=list, description="Primary key fields")
     is_extendable: bool = Field(default=True, description="Whether the CDS view entity supports extension")
+    package: Optional[str] = Field(default=None, description="ABAP development package (e.g., VDM_SD_SLS_SO)")
+    application_component: Optional[str] = Field(default=None, description="SAP Application Component hierarchy (e.g., SD-SLS, MM-PUR, FI-GL)")
+    domain: Optional[str] = Field(default=None, description="Resolved SAP business domain")
+    object_type: Optional[str] = Field(default="DDLS/DF", description="ADT object type (e.g., DDLS/DF)")
+    source_type: Optional[str] = Field(default=None, description="CDS source type (view_entity, view, projection_view)")
+    cds_construct_type: CDSConstructType = Field(
+        default=CDSConstructType.UNKNOWN,
+        description="Base CDS construct type: CLASSIC_VIEW, VIEW_ENTITY, or UNKNOWN",
+    )
+    version: Optional[str] = Field(default="active", description="Repository version (active/inactive)")
+    structured_metadata: Optional[Any] = Field(default=None, description="Structured Milestone 9 CDSViewMetadata instance")
+    field_details: List[Any] = Field(default_factory=list, description="Structured CDSFieldMetadata items")
+    association_details: List[Any] = Field(default_factory=list, description="Structured CDSAssociationMetadata items")
+    annotation_details: List[Any] = Field(default_factory=list, description="Structured CDSAnnotationMetadata items")
+    parameters: List[Dict[str, Any]] = Field(default_factory=list, description="CDS view parameters")
 
 
 class StructuredRequirement(BaseModel):
@@ -137,8 +168,10 @@ class FieldMapping(BaseModel):
     mapping_type: MappingType = Field(default=MappingType.MISSING, description="Mapping classification")
     evidence_level: EvidenceLevel = Field(default=EvidenceLevel.LEVEL_6_MISSING, description="Strict evidence tier (Level 1-6)")
     evidence_detail: str = Field(default="", description="Detailed human-readable evidence justifying the mapping")
+    association_name: Optional[str] = Field(default=None, description="Association alias name (e.g. _Item)")
     association_target_view: Optional[str] = Field(default=None, description="Target CDS view if verified association hop")
     association_target_field: Optional[str] = Field(default=None, description="Target field on verified association view")
+    cardinality: Optional[str] = Field(default=None, description="Association cardinality (e.g. [0..1], [0..*])")
     transformation_rule: Optional[str] = Field(default=None, description="Calculation formula or transformation expression")
     confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="Mapping confidence score")
 
@@ -170,6 +203,7 @@ class Decision(BaseModel):
     rationale: str = Field(..., description="Detailed technical justification for the recommended action")
     missing_fields: List[str] = Field(default_factory=list, description="Requested fields not present in base view")
     proposed_extension_name: Optional[str] = Field(default=None, description="Proposed extension name if action is EXTEND")
+    proposed_sql_view_append_name: Optional[str] = Field(default=None, description="Proposed SQL view append name for classic CDS view extension (max 16 chars)")
     proposed_new_view_name: Optional[str] = Field(default=None, description="Proposed new CDS view name if action is CREATE")
     requires_composition: bool = Field(default=False, description="True if multi-CDS composition is required")
     complementary_views: List[str] = Field(default_factory=list, description="Complementary CDS candidates for multi-CDS composition")
@@ -251,6 +285,57 @@ class SAPCheckrunResult(BaseModel):
     http_status: Optional[int] = Field(default=None, description="HTTP status code from ADT checkrun response")
     content_type: Optional[str] = Field(default=None, description="Content-Type header from ADT response")
     reason: Optional[str] = Field(default=None, description="Explanatory text when status is UNAVAILABLE or INSUFFICIENT_EVIDENCE")
+
+
+class SAPReviewCheckrunResult(BaseModel):
+    """Aggregate result of controlled remote SAP ADT checkrun for an approved inactive review package."""
+
+    review_id: str = Field(..., description="Review ID of the checked CDS proposal")
+    sap_object_name: str = Field(..., description="Target CDS object name checked in SAP DEV")
+    status: SAPValidationStatus = Field(
+        default=SAPValidationStatus.UNAVAILABLE,
+        description="Overall SAP validation outcome (PASS, WARNING, ERROR, UNAVAILABLE)",
+    )
+    success: bool = Field(
+        default=False,
+        description="True if checkrun completed with 0 blocking E/A/X errors",
+    )
+    check_report_status: Optional[str] = Field(
+        default=None,
+        description="Report status from ADT checkReport (e.g. 'processed')",
+    )
+    blocking_errors: int = Field(
+        default=0,
+        description="Count of blocking errors (severity E, A, X)",
+    )
+    warnings: int = Field(
+        default=0,
+        description="Count of compiler warnings (severity W)",
+    )
+    information: int = Field(
+        default=0,
+        description="Count of informational messages (severity I, S)",
+    )
+    messages: List[SAPCheckMessage] = Field(
+        default_factory=list,
+        description="Structured check messages returned from SAP",
+    )
+    timestamp: datetime = Field(
+        default_factory=utc_now,
+        description="Timestamp of checkrun execution",
+    )
+    source_hash: Optional[str] = Field(
+        default=None,
+        description="Hash of the DDL source code verified by this checkrun",
+    )
+    http_status: Optional[int] = Field(
+        default=None,
+        description="HTTP status code from SAP ADT checkrun response",
+    )
+    reason: Optional[str] = Field(
+        default=None,
+        description="Reason if checkrun failed or unavailable",
+    )
 
 
 class ValidationResult(BaseModel):
@@ -362,6 +447,7 @@ class CDSDraft(BaseModel):
     decision_action: DecisionAction = Field(..., description="Decision from Milestone 5 (REUSE, EXTEND, CREATE, INSUFFICIENT_EVIDENCE)")
     object_name: str = Field(..., description="Target CDS view or extension name")
     object_type: str = Field(default="VIEW_ENTITY", description="REUSE_PROPOSAL, VIEW_ENTITY_EXTENSION, CUSTOM_VIEW_ENTITY, COMPOSITION_PROPOSAL")
+    sql_view_append_name: Optional[str] = Field(default=None, description="SQL view append structure name for classic CDS view extension (max 16 chars, customer namespace Z or Y)")
     proposed_layer: CDSLayer = Field(default=CDSLayer.BASIC, description="Proposed VDM layer")
     source_views: List[str] = Field(default_factory=list, description="Verified source CDS view entities")
     fields: List[DraftFieldElement] = Field(default_factory=list, description="Projected fields with evidence")
@@ -376,5 +462,169 @@ class CDSDraft(BaseModel):
     generation_status: str = Field(default="GENERATED", description="GENERATED, VALIDATED, INSUFFICIENT_EVIDENCE, REJECTED")
     sap_validation_status: Optional[SAPValidationStatus] = Field(default=None, description="Outcome of remote SAP ADT checkrun")
     unresolved_items: List[str] = Field(default_factory=list, description="Requested concepts that could not be verified")
+    code_source: str = Field(default="GEMINI_GENERATED", description="Source of code: GEMINI_GENERATED or USER_PROVIDED")
+    original_user_code: Optional[str] = Field(default=None, description="Raw user-provided code if code_source is USER_PROVIDED")
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class ReviewAuditEvent(BaseModel):
+    """Immutable audit record for human review actions."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    action: str = Field(..., description="Action taken: REVIEW_APPROVED, REVIEW_REJECTED, REVIEW_CHANGES_REQUESTED")
+    previous_status: ReviewStatus = Field(..., description="Review state before this action")
+    new_status: ReviewStatus = Field(..., description="Review state after this action")
+    timestamp: datetime = Field(default_factory=utc_now, description="Timestamp of the review event")
+    reviewer: str = Field(..., description="Identifier of the reviewer")
+    reason: Optional[str] = Field(default=None, description="Mandatory reason for rejection or change request")
+    decision_action: DecisionAction = Field(..., description="Underlying architectural decision being reviewed")
+    details: Dict[str, Any] = Field(default_factory=dict, description="Sanitized event metadata (no secrets)")
+
+
+class CDSReviewPackage(BaseModel):
+    """Structured, evidence-grounded review package presented to the human gatekeeper."""
+
+    review_id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique review package ID")
+    requirement_id: str = Field(..., description="Business requirement ID")
+    created_at: datetime = Field(default_factory=utc_now)
+    status: ReviewStatus = Field(default=ReviewStatus.PENDING_REVIEW, description="Current review state")
+    reviewer: Optional[str] = Field(default=None, description="Reviewer who approved, rejected, or requested changes")
+    review_comment: Optional[str] = Field(default=None, description="Reviewer feedback or reason")
+    review_timestamp: Optional[datetime] = Field(default=None, description="Timestamp of reviewer action")
+    can_approve: bool = Field(default=False, description="Whether all deterministic approval gates are satisfied")
+    blocking_reasons: List[str] = Field(default_factory=list, description="Reasons why approval is currently blocked")
+    approval_confirmation_notice: str = Field(
+        default="You are approving this AI-generated CDS proposal for the next controlled workflow stage. No SAP object will be modified by this approval.",
+        description="Explicit confirmation text shown before approval",
+    )
+
+    # 1. Requirement Section
+    original_requirement: BusinessRequirement
+    normalized_requirement: Optional[StructuredRequirement] = None
+    dimensions: List[str] = Field(default_factory=list)
+    measures: List[str] = Field(default_factory=list)
+    filters: List[str] = Field(default_factory=list)
+
+    # 2. SAP Evidence Section
+    selected_candidate: Optional[CDSCandidate] = None
+    candidate_package: Optional[str] = None
+    candidate_object_type: Optional[str] = None
+    candidate_release_status: Optional[str] = None
+    structured_metadata: Optional[Any] = None
+    real_fields: List[Any] = Field(default_factory=list)
+    associations: List[Any] = Field(default_factory=list)
+    evidence_levels: List[str] = Field(default_factory=list)
+
+    # 3. Mapping Section
+    field_mappings: List[FieldMapping] = Field(default_factory=list)
+    mapping_warnings: List[str] = Field(default_factory=list)
+
+    # 4. Decision Section
+    decision: Decision
+    decision_action: DecisionAction
+    decision_confidence: float
+    decision_rationale: str
+    missing_fields: List[str] = Field(default_factory=list)
+    decision_warnings: List[str] = Field(default_factory=list)
+
+    # 5. Generated Artifact Section
+    code_source: str = Field(default="GEMINI_GENERATED", description="Source of code: GEMINI_GENERATED or USER_PROVIDED")
+    original_user_code: Optional[str] = Field(default=None, description="Raw user-provided code if code_source is USER_PROVIDED")
+    cds_draft: Optional[CDSDraft] = None
+    object_name: Optional[str] = None
+    object_type: Optional[str] = None
+    sql_view_append_name: Optional[str] = None
+    ddl_source: Optional[str] = None
+    generation_warnings: List[str] = Field(default_factory=list)
+
+    # 6. Validation Section
+    validation_result: Optional[ValidationResult] = None
+    is_valid: bool = False
+    sap_validation_status: SAPValidationStatus = SAPValidationStatus.UNAVAILABLE
+    diagnostics: List[Dict[str, Any]] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    latest_sap_checkrun: Optional[SAPReviewCheckrunResult] = None
+
+    # 7. Audit Section
+    audit_events: List[ReviewAuditEvent] = Field(default_factory=list)
+
+
+class SAPCreationResult(BaseModel):
+    """Structured outcome of controlled SAP DEV CDS creation."""
+
+    success: bool = Field(..., description="Whether the creation operation succeeded")
+    operation: str = Field(default="CREATE_CDS_VIEW", description="Operation performed (CREATE_CDS_VIEW, EXTEND_CDS_VIEW, REUSE_STANDARD_VIEW)")
+    review_id: str = Field(..., description="Approved review ID authorizing this creation")
+    sap_object_name: str = Field(..., description="Technical SAP CDS object name")
+    repository_uri: Optional[str] = Field(default=None, description="ADT repository URI of the created object")
+    object_type: str = Field(default="DDLS/DF", description="ADT object type")
+    package: str = Field(..., description="Target SAP ABAP package")
+    creation_timestamp: datetime = Field(default_factory=utc_now)
+    activation_status: str = Field(default="INACTIVE", description="Activation state (strictly INACTIVE in Milestone 13)")
+    transport_request: Optional[str] = Field(default=None, description="Workbench Transport Request number if returned")
+    sap_http_status: Optional[int] = Field(default=None, description="HTTP status code from SAP ADT")
+    sap_write_performed: bool = Field(default=False, description="Whether an authentic network write was executed")
+    diagnostics: List[Dict[str, Any]] = Field(default_factory=list, description="Step-by-step diagnostic records")
+    error_message: Optional[str] = Field(default=None, description="Sanitized error description if failed")
+
+
+class SAPActivationResult(BaseModel):
+    """Structured outcome of controlled SAP DEV CDS activation."""
+
+    success: bool = Field(..., description="Whether the activation operation succeeded")
+    review_id: str = Field(..., description="Approved review ID authorizing this activation")
+    sap_object_name: str = Field(..., description="Technical SAP CDS object name")
+    repository_uri: Optional[str] = Field(default=None, description="ADT repository URI of the activated object")
+    activation_status: str = Field(default="ACTIVE", description="Final activation status (ACTIVE or INACTIVE)")
+    transport_request: Optional[str] = Field(default=None, description="Workbench Transport Request number")
+    sap_http_status: Optional[int] = Field(default=None, description="HTTP status code from SAP ADT activation")
+    sap_write_performed: bool = Field(default=False, description="Whether an authentic network write was executed")
+    diagnostics: List[Dict[str, Any]] = Field(default_factory=list, description="Step-by-step diagnostic records")
+    syntax_messages: List[Dict[str, Any]] = Field(default_factory=list, description="Structured compiler diagnostics")
+    error_message: Optional[str] = Field(default=None, description="Sanitized error description if failed")
+    activated_at: datetime = Field(default_factory=utc_now)
+
+
+class CDSWorkflowState(TypedDict, total=False):
+    """Encapsulates the complete lifecycle state flowing through the CDS workflow."""
+
+    # 1. Input Stage
+    requirement: Optional[BusinessRequirement]
+    structured_requirement: Optional[StructuredRequirement]
+
+    # 2. Discovery & Mapping Stage
+    candidates: List[CDSCandidate]
+    evaluated_candidates: List[Any]
+    field_mappings: List[FieldMapping]
+    discovery_status: Optional[str]
+    mapping_warnings: List[str]
+    llm_mapping: Optional[Dict[str, Any]]
+    pipeline_status: Optional[str]
+
+    # 3. Decision Stage
+    decision: Optional[Decision]
+    proposed_extension_name: Optional[str]
+    proposed_sql_view_append_name: Optional[str]
+
+    # 4. Modeling & Generation Stage
+    data_model: Optional[DataModel]
+    cds_draft: Optional[CDSDraft]
+    sql_view_append_name: Optional[str]
+    generated_cds_code: Optional[str]
+
+    # 5. Validation Stage
+    validation_result: Optional[ValidationResult]
+
+    # 6. Governance & Review Gate Stage
+    deployment_request: Optional[DeploymentRequest]
+    review_status: ReviewStatus
+    review_package: Optional[Any]
+    is_human_approved: bool
+
+    # 7. Audit & Pipeline Execution Metadata
+    audit_logs: List[Dict[str, Any]]
+    errors: List[str]
+    current_step: str
+
 

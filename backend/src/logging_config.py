@@ -20,6 +20,8 @@ def setup_logging(log_level: Optional[str] = "INFO") -> None:
     # Silence overly verbose third-party loggers
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 logger = logging.getLogger("sap_cds_platform")

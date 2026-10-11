@@ -56,7 +56,7 @@ async def get_health_status():
             "driver": db_driver,
         },
         sap_connector={
-            "status": "unconnected (guarded)",
+            "status": "connected (live)" if sap_info.is_connected else "unconnected (guarded)",
             "system_id": sap_info.system_id,
             "client": sap_info.client,
             "s4hana_release": sap_info.s4hana_release,

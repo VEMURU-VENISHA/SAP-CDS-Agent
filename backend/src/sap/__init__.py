@@ -9,7 +9,11 @@ Milestone 1 adheres to strict enterprise guardrails:
 from src.sap.interface import ISAPConnector
 from src.sap.models import (
     ActivationResult,
+    CDSAnnotationMetadata,
+    CDSAssociationMetadata,
+    CDSFieldMetadata,
     CDSMetadata,
+    CDSViewMetadata,
     DependencyGraph,
     DraftResult,
     FieldDefinition,
@@ -30,6 +34,10 @@ __all__ = [
     "reset_sap_connector",
     "SAPSystemInfo",
     "CDSMetadata",
+    "CDSViewMetadata",
+    "CDSFieldMetadata",
+    "CDSAssociationMetadata",
+    "CDSAnnotationMetadata",
     "FieldDefinition",
     "DependencyGraph",
     "DraftResult",

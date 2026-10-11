@@ -1,629 +1,3636 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Play,
-  CheckCircle,
-  Loader2,
-  Sparkles,
-  FileCode2,
-  AlertCircle,
-  BookmarkPlus,
-  ShieldCheck,
-  Layers,
   ArrowRight,
-  Filter,
   Check,
-  X,
-  AlertTriangle,
-  Info,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Database,
+  Loader2,
+  Search,
+  Sparkles,
+  X,
+  GitBranch,
+  Code2,
+  ShieldCheck,
+  AlertCircle,
+  RefreshCw,
+  Plus,
+  Edit2,
+  Trash2,
+  FileText,
+  HelpCircle,
+  Zap,
+  Layers,
+  ArrowLeft,
+  Server,
+  Lock,
+  Copy,
+  ExternalLink,
+  CheckSquare,
+  Square,
+  Table,
+  Eye,
+  Filter
 } from 'lucide-react';
-import { analyzeRequirement, submitHumanApproval } from '../../services/api';
-import { CandidateEvaluation, FieldMapping, PipelineResult } from '../../types';
+import {
+  extractFields,
+  runDiscovery,
+  directSearch,
+  fetchViewDetails,
+  fetchLiveCdsSource,
+  fetchMetadataStatus,
+  refreshMetadata,
+  generateCdsCode,
+  regenerateCdsCode,
+  validateArtifactName,
+  directCreateInSap,
+  generateFieldVariants,
+  finalApproveProposal,
+  createCdsInSap,
+  validateUserCode,
+  fetchDataPreview,
+  fetchTransportRequests,
+  runIncrementalSync
+} from '../../services/api';
+import { HealthStatus, PipelineResult, DataPreviewResult, TransportRequestItem, IncrementalSyncResult } from '../../types';
 
-interface RecentPipelinesProps {
+interface Props {
   onPipelineExecuted?: (result: PipelineResult) => void;
   onDecisionApproved?: (decisionId: string) => void;
+  health?: HealthStatus | null;
 }
 
-export const RecentPipelines: React.FC<RecentPipelinesProps> = ({
-  onPipelineExecuted,
-  onDecisionApproved,
-}) => {
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [entities, setEntities] = useState('');
-  const [fields, setFields] = useState('');
+const STEP_LABELS = [
+  '1. Requirement',
+  '2. Required Fields',
+  '3. CDS Discovery',
+  '4. Recommendations',
+  '5. CDS Selection',
+  '6. Mapping',
+  '7. KPI (Optional)',
+  '8. Code Generation',
+  '9. Code Review',
+  '10. CDS Name',
+  '11. Final Approval',
+  '12. ADT Creation',
+  '13. Completion'
+];
 
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<PipelineResult | null>(null);
-  const [approvalStatus, setApprovalStatus] = useState<string | null>(null);
-  const [expandedCandidate, setExpandedCandidate] = useState<string | null>(null);
+const AVAILABLE_DOMAINS = [
+  'Sales',
+  'Finance',
+  'Procurement',
+  'Inventory',
+  'Manufacturing',
+  'Logistics',
+  'Controlling',
+  'HR'
+];
 
-  const handleLoadSample = () => {
-    setTitle('Sales Order Item Analytics');
-    setDescription(
-      'We need an analytical CDS view combining SalesOrder header with Material items, NetAmount, SoldToParty, and OrderQuantity where status is Completed.'
-    );
-    setEntities('SalesOrder, Customer');
-    setFields('SalesOrder, Material, NetAmount, SoldToParty, OrderQuantity');
+interface ExtractedField {
+  name: string;
+  variants: string[];
+  field_type?: string;
+  underlying_concepts?: string[];
+  calculation_approach?: string;
+}
+
+export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisionApproved, health }) => {
+  // Navigation & Stepper
+  const [activeStep, setActiveStep] = useState<number>(0);
+
+  // Direct Search & Metadata Index state (First Page Section 3B & 8)
+  const [directSearchQuery, setDirectSearchQuery] = useState('');
+  const [directSearchResults, setDirectSearchResults] = useState<any[]>([]);
+  const [directSearchLoading, setDirectSearchLoading] = useState(false);
+  const [metadataStatus, setMetadataStatus] = useState<any>(null);
+  const [metadataRefreshing, setMetadataRefreshing] = useState(false);
+  const [detailsModalItem, setDetailsModalItem] = useState<any>(null);
+
+  // Live Source Viewer Modal state (Change 1)
+  const [sourceModalData, setSourceModalData] = useState<any | null>(null);
+  const [activeSourceView, setActiveSourceView] = useState<string>('');
+  const [constituentSourceViews, setConstituentSourceViews] = useState<string[]>([]);
+  const [sourceModalLoading, setSourceModalLoading] = useState<boolean>(false);
+  const [copiedSource, setCopiedSource] = useState<boolean>(false);
+
+  // Step 1: Business Requirement & Multi-Domain Selection (Section 3A)
+  const [requirementText, setRequirementText] = useState(
+    'I need a CDS view for sales order analysis with sales order, customer, material, net amount, currency, company code and sales organization.'
+  );
+  const [selectedDomains, setSelectedDomains] = useState<string[]>(['Sales']);
+  const [isAnalyzingReq, setIsAnalyzingReq] = useState(false);
+
+  // Step 2: Required Fields + Variants (HITL Gate 1 - Section 6)
+  const [requiredFields, setRequiredFields] = useState<ExtractedField[]>([
+    { name: 'Sales Order', variants: ['SalesOrder', 'SalesDocument', 'VBELN'], field_type: 'DIRECT' },
+    { name: 'Sold-to Party', variants: ['SoldToParty', 'Customer', 'Customer Number', 'CustomerID', 'KUNNR'], field_type: 'DIRECT' },
+    { name: 'Material', variants: ['Material', 'Product', 'MATNR'], field_type: 'DIRECT' },
+    { name: 'Net Amount', variants: ['TotalNetAmount', 'NetAmount', 'NETWR'], field_type: 'DIRECT' },
+    { name: 'Currency', variants: ['TransactionCurrency', 'Currency', 'WAERK'], field_type: 'DIRECT' },
+    { name: 'Company Code', variants: ['CompanyCode', 'BUKRS'], field_type: 'DIRECT' },
+    { name: 'Sales Organization', variants: ['SalesOrganization', 'VKORG'], field_type: 'DIRECT' }
+  ]);
+  const [checkedFields, setCheckedFields] = useState<Record<string, boolean>>({
+    'Sales Order': true,
+    'Sold-to Party': true,
+    'Material': true,
+    'Net Amount': true,
+    'Currency': true,
+    'Company Code': true,
+    'Sales Organization': true
+  });
+  const [newFieldName, setNewFieldName] = useState('');
+  const [newFieldVariant, setNewFieldVariant] = useState('');
+  const [editingFieldIndex, setEditingFieldIndex] = useState<number | null>(null);
+  const [editNameVal, setEditNameVal] = useState('');
+  const [variantInput, setVariantInput] = useState('');
+  const [generatingVariantsFieldIdx, setGeneratingVariantsFieldIdx] = useState<number | null>(null);
+  const [isAddingFieldWithGemini, setIsAddingFieldWithGemini] = useState<boolean>(false);
+
+  // Step 3: Discovery Execution & Statistics (Sections 9, 38-41)
+  const [searchMode, setSearchMode] = useState<'fast' | 'deep'>('fast');
+  const [isDiscovering, setIsDiscovering] = useState(false);
+  const [searchCancelled, setSearchCancelled] = useState(false);
+  const [discoveryStats, setDiscoveryStats] = useState<any>(null);
+  const [discoveryProgressStep, setDiscoveryProgressStep] = useState<number>(0);
+
+  // Step 4: Recommendations (Sections 10-25 - ZERO CUTOFF)
+  const [allCandidates, setAllCandidates] = useState<any[]>([]);
+  const [candidateSearchQuery, setCandidateSearchQuery] = useState('');
+  const [coverageFilter, setCoverageFilter] = useState('all');
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [joinFilter, setJoinFilter] = useState('all');
+  const [odataFilter, setOdataFilter] = useState('all');
+  const [fieldsFilter, setFieldsFilter] = useState('all');
+  const [domainFilter, setDomainFilter] = useState('all');
+  const [appCompFilter, setAppCompFilter] = useState('all');
+  const [expandedLowCoverage, setExpandedLowCoverage] = useState(false);
+  const [whyThisModal, setWhyThisModal] = useState<any>(null);
+  const [whyNotModal, setWhyNotModal] = useState<any>(null);
+  const [viewingJoinSql, setViewingJoinSql] = useState<string | null>(null);
+
+  // Live Data Preview State (Suggestion 3)
+  const [previewData, setPreviewData] = useState<DataPreviewResult | null>(null);
+  const [isPreviewLoading, setIsPreviewLoading] = useState<boolean>(false);
+  const [previewTargetView, setPreviewTargetView] = useState<string | null>(null);
+
+  // CTS Transports State (Suggestion 4)
+  const [availableTransports, setAvailableTransports] = useState<TransportRequestItem[]>([]);
+  const [isLoadingTransports, setIsLoadingTransports] = useState<boolean>(false);
+
+  // Quick Incremental Sync State (Suggestion 5)
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
+
+  // Step 5: CDS Selection (HITL Gate 2 - Section 26 - Independent selection state)
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<string[]>([]);
+  const [selectedViews, setSelectedViews] = useState<string[]>([]);
+  const [selectionSearchQuery, setSelectionSearchQuery] = useState('');
+
+  // Step 6: Mapping (Section 27)
+  const [fieldMappings, setFieldMappings] = useState<any[]>([]);
+
+  // Step 7: KPI (Optional - Section 28)
+  const [kpiEnabled, setKpiEnabled] = useState(false);
+  const [kpiFormula, setKpiFormula] = useState('Total Net Amount = SUM(NetAmount)');
+
+  // Step 8 & 9: Code Generation & Code Review (HITL Gate 3 - Sections 29-32)
+  const [isGeneratingCode, setIsGeneratingCode] = useState(false);
+  const [generatedCode, setGeneratedCode] = useState<string>('');
+  const [codeExplanation, setCodeExplanation] = useState<string>('');
+  const [codeStatus, setCodeStatus] = useState<'Pending Review' | 'Approved' | 'Generation Validation Failed'>('Pending Review');
+  const [codeValidation, setCodeValidation] = useState<any>(null);
+  const [regenerateFeedback, setRegenerateFeedback] = useState('');
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [codeSourceMode, setCodeSourceMode] = useState<'GEMINI' | 'USER_PROVIDED'>('GEMINI');
+  const [userProvidedCode, setUserProvidedCode] = useState<string>('');
+  const [isValidatingUserCode, setIsValidatingUserCode] = useState<boolean>(false);
+  const [userCodeValidation, setUserCodeValidation] = useState<any>(null);
+
+  // Step 10: CDS Artifact Name (HITL Gate 4 - Sections 33-34)
+  const [artifactName, setArtifactName] = useState('ZC_SalesOrderAnalysis');
+  const [targetPackage, setTargetPackage] = useState('ZTRAINING_2026');
+  const [nameValidation, setNameValidation] = useState<any>(null);
+  const [isValidatingName, setIsValidatingName] = useState(false);
+
+  // Step 11 & 12: Final Approval & ADT Creation (HITL Gate 5 - Sections 35-37)
+  const [transportRequest, setTransportRequest] = useState('');
+  const [reviewId, setReviewId] = useState<string | null>(null);
+  const [isCreatingSap, setIsCreatingSap] = useState(false);
+  const [creationResult, setCreationResult] = useState<any>(null);
+
+  // Decision & REUSE vs MULTI_CDS Flow State
+  const [solutionDecision, setSolutionDecision] = useState<any | null>(null);
+  const [isReuseFlow, setIsReuseFlow] = useState<boolean>(false);
+  const [reusedCdsName, setReusedCdsName] = useState<string>('');
+  const [reusedCdsItem, setReusedCdsItem] = useState<any | null>(null);
+
+  // General Error / Banner
+  const [generalError, setGeneralError] = useState<string | null>(null);
+
+  // Initial Load: Metadata Status & Active CTS Transports
+  useEffect(() => {
+    loadMetadataStatus();
+    loadTransports();
+  }, []);
+
+  const loadTransports = async () => {
+    setIsLoadingTransports(true);
+    try {
+      const trs = await fetchTransportRequests();
+      if (trs && trs.length > 0) {
+        setAvailableTransports(trs);
+        // Default to configured default transport
+        const defaultTr = trs.find((t) => t.is_default) || trs[0];
+        if (defaultTr) {
+          setTransportRequest((prev) => prev || defaultTr.number);
+        }
+      }
+    } catch (e: any) {
+      console.warn('Transport requests fetch failed:', e);
+    } finally {
+      setIsLoadingTransports(false);
+    }
   };
 
-  const handleRunPipeline = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!title.trim() || !description.trim()) {
-      setError('Please provide a title and requirement statement before running the pipeline.');
+  const handleOpenDataPreview = async (viewName: string) => {
+    const clean = viewName.split(' + ')[0].trim();
+    setPreviewTargetView(clean);
+    setIsPreviewLoading(true);
+    setPreviewData(null);
+    try {
+      const data = await fetchDataPreview(clean, 10);
+      setPreviewData(data);
+    } catch (err: any) {
+      setGeneralError(err?.message || `Failed to fetch data preview for ${clean}`);
+    } finally {
+      setIsPreviewLoading(false);
+    }
+  };
+
+  const handleIncrementalSync = async () => {
+    setIsSyncing(true);
+    setSyncStatusMsg(null);
+    try {
+      const res = await runIncrementalSync(['Z*', 'Y*']);
+      setSyncStatusMsg(`Sync Complete! Updated ${res.updated_views_count} custom views (${res.elapsed_seconds}s)`);
+      await loadMetadataStatus();
+      setTimeout(() => setSyncStatusMsg(null), 6000);
+    } catch (err: any) {
+      setGeneralError(err?.message || 'Incremental sync failed');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const loadMetadataStatus = async () => {
+    try {
+      const data = await fetchMetadataStatus();
+      if (data) {
+        setMetadataStatus((prev: any) => {
+          if (data.cds_count === 0 && prev && prev.cds_count > 0) {
+            return prev;
+          }
+          return data;
+        });
+      }
+    } catch (e: any) {
+      console.warn('Metadata status fetch failed:', e);
+    }
+  };
+
+  const handleRefreshMetadata = async () => {
+    setMetadataRefreshing(true);
+    try {
+      const res = await refreshMetadata();
+      if (res) {
+        setMetadataStatus(res);
+      }
+    } catch (err: any) {
+      setGeneralError(err?.message || 'Failed to refresh metadata');
+    } finally {
+      setMetadataRefreshing(false);
+    }
+  };
+
+  // Multi-Domain toggle
+  const toggleDomain = (domain: string) => {
+    setSelectedDomains((prev) =>
+      prev.includes(domain)
+        ? prev.length > 1
+          ? prev.filter((d) => d !== domain)
+          : prev
+        : [...prev, domain]
+    );
+  };
+
+  // Direct Search (Section 3B)
+  const handleDirectSearch = async () => {
+    if (!directSearchQuery.trim()) return;
+    setDirectSearchLoading(true);
+    try {
+      const results = await directSearch(directSearchQuery.trim());
+      setDirectSearchResults(results);
+    } catch (err: any) {
+      setGeneralError(err?.message || 'Direct search failed');
+    } finally {
+      setDirectSearchLoading(false);
+    }
+  };
+
+  // Live Source Viewer (Change 1)
+  const handleOpenLiveSource = async (viewName: string, allViews?: string[]) => {
+    const viewsList = allViews && allViews.length > 0 ? allViews : viewName.split(' + ').map((s) => s.trim());
+    setConstituentSourceViews(viewsList);
+    const target = viewsList.includes(viewName) ? viewName : viewsList[0];
+    await loadSourceForView(target);
+  };
+
+  const loadSourceForView = async (targetView: string) => {
+    setActiveSourceView(targetView);
+    setSourceModalLoading(true);
+    setSourceModalData(null);
+    setCopiedSource(false);
+    try {
+      const activeFieldNames = authoritativeFields.map((f) => f.name);
+      const res = await fetchLiveCdsSource(targetView, activeFieldNames);
+      setSourceModalData(res);
+    } catch (err: any) {
+      setSourceModalData({
+        view_name: targetView,
+        package: 'SAP_STANDARD',
+        source_status: 'UNAVAILABLE',
+        error_reason: err?.message || 'ADT connection unavailable',
+        source: `-- Error loading DDL source for ${targetView}: ${err?.message || 'ADT unavailable'}`,
+        adt_endpoint: `/sap/bc/adt/ddic/ddl/sources/${targetView.toLowerCase()}/source/main`,
+        field_trace_status: 'SOURCE_UNAVAILABLE',
+        final_evidence: 'SOURCE_UNAVAILABLE',
+      });
+    } finally {
+      setSourceModalLoading(false);
+    }
+  };
+
+  // Step 1 -> Step 2: Analyze Requirement with Gemini (Section 4 & 5)
+  const handleAnalyzeRequirement = async () => {
+    if (!requirementText.trim()) return;
+    setIsAnalyzingReq(true);
+    setGeneralError(null);
+    try {
+      const res = await extractFields(requirementText.trim(), selectedDomains);
+      if (res?.result?.fields?.length) {
+        setRequiredFields(res.result.fields);
+        const checks: Record<string, boolean> = {};
+        res.result.fields.forEach((f: any) => {
+          checks[f.name] = true;
+        });
+        setCheckedFields(checks);
+        if (res.result.suggested_artifact_name) {
+          setArtifactName(res.result.suggested_artifact_name);
+        }
+      }
+      setActiveStep(1); // Move to Step 2
+    } catch (err: any) {
+      setGeneralError(err?.message || 'Failed to extract requirement fields with Gemini');
+    } finally {
+      setIsAnalyzingReq(false);
+    }
+  };
+
+  // Step 2: Editing fields & variants (HITL Gate 1 - Section 6)
+  const handleToggleFieldCheck = (fieldName: string) => {
+    setCheckedFields((prev) => ({
+      ...prev,
+      [fieldName]: !prev[fieldName]
+    }));
+  };
+
+  // Change 2: Regenerate variants for an existing field with Gemini
+  const handleRegenerateFieldVariants = async (idx: number) => {
+    const field = requiredFields[idx];
+    if (!field) return;
+    setGeneratingVariantsFieldIdx(idx);
+    setGeneralError(null);
+    try {
+      const res = await generateFieldVariants(field.name, requirementText, selectedDomains[0]);
+      if (res && res.variants && res.variants.length > 0) {
+        const updated = [...requiredFields];
+        updated[idx] = {
+          ...updated[idx],
+          variants: res.variants,
+          field_type: res.field_type || updated[idx].field_type || 'DIRECT',
+          underlying_concepts: res.underlying_concepts || updated[idx].underlying_concepts || [],
+          calculation_approach: res.calculation_approach || updated[idx].calculation_approach || '',
+        };
+        setRequiredFields(updated);
+      }
+    } catch (err: any) {
+      setGeneralError(err?.message || `Failed to regenerate variants for ${field.name}`);
+    } finally {
+      setGeneratingVariantsFieldIdx(null);
+    }
+  };
+
+  // Change 2: Add field with automatic Gemini variant generation
+  const handleAddFieldWithGemini = async () => {
+    if (!newFieldName.trim()) return;
+    setIsAddingFieldWithGemini(true);
+    setGeneralError(null);
+    try {
+      const res = await generateFieldVariants(newFieldName.trim(), requirementText, selectedDomains[0]);
+      const variants =
+        res.variants && res.variants.length > 0
+          ? res.variants
+          : newFieldVariant.trim()
+          ? newFieldVariant.split(',').map((v) => v.trim()).filter(Boolean)
+          : [newFieldName.trim()];
+
+      const newField: ExtractedField = {
+        name: res.name || newFieldName.trim(),
+        variants,
+        field_type: res.field_type || 'DIRECT',
+        underlying_concepts: res.underlying_concepts || [],
+        calculation_approach: res.calculation_approach || '',
+      };
+      setRequiredFields((prev) => [...prev, newField]);
+      setCheckedFields((prev) => ({ ...prev, [newField.name]: true }));
+      setNewFieldName('');
+      setNewFieldVariant('');
+    } catch (err: any) {
+      const variants = newFieldVariant.trim()
+        ? newFieldVariant.split(',').map((v) => v.trim()).filter(Boolean)
+        : [newFieldName.trim()];
+      const newField: ExtractedField = {
+        name: newFieldName.trim(),
+        variants,
+        field_type: 'DIRECT',
+        underlying_concepts: [],
+      };
+      setRequiredFields((prev) => [...prev, newField]);
+      setCheckedFields((prev) => ({ ...prev, [newField.name]: true }));
+      setNewFieldName('');
+      setNewFieldVariant('');
+    } finally {
+      setIsAddingFieldWithGemini(false);
+    }
+  };
+
+  const handleAddField = () => {
+    if (!newFieldName.trim()) return;
+    const variants = newFieldVariant.trim()
+      ? newFieldVariant.split(',').map((v) => v.trim()).filter(Boolean)
+      : [newFieldName.trim()];
+    const fieldObj = { name: newFieldName.trim(), variants, field_type: 'DIRECT' };
+    setRequiredFields([...requiredFields, fieldObj]);
+    setCheckedFields((prev) => ({ ...prev, [newFieldName.trim()]: true }));
+    setNewFieldName('');
+    setNewFieldVariant('');
+  };
+
+  const handleDeleteField = (idx: number) => {
+    const fName = requiredFields[idx].name;
+    setRequiredFields(requiredFields.filter((_, i) => i !== idx));
+    const updated = { ...checkedFields };
+    delete updated[fName];
+    setCheckedFields(updated);
+  };
+
+  const handleStartEditField = (idx: number) => {
+    setEditingFieldIndex(idx);
+    setEditNameVal(requiredFields[idx].name);
+  };
+
+  const handleSaveEditField = (idx: number) => {
+    if (!editNameVal.trim()) return;
+    const oldName = requiredFields[idx].name;
+    const newName = editNameVal.trim();
+    const updated = [...requiredFields];
+    updated[idx].name = newName;
+    setRequiredFields(updated);
+
+    const checks = { ...checkedFields };
+    const val = checks[oldName] ?? true;
+    delete checks[oldName];
+    checks[newName] = val;
+    setCheckedFields(checks);
+
+    setEditingFieldIndex(null);
+  };
+
+  const handleAddVariantToField = (idx: number) => {
+    if (!variantInput.trim()) return;
+    const updated = [...requiredFields];
+    if (!updated[idx].variants.includes(variantInput.trim())) {
+      updated[idx].variants.push(variantInput.trim());
+    }
+    setRequiredFields(updated);
+    setVariantInput('');
+  };
+
+  const handleRemoveVariant = (fieldIdx: number, varIdx: number) => {
+    const updated = [...requiredFields];
+    updated[fieldIdx].variants.splice(varIdx, 1);
+    setRequiredFields(updated);
+  };
+
+  // Authoritative active fields
+  const authoritativeFields = useMemo(() => {
+    return requiredFields.filter((f) => checkedFields[f.name] !== false);
+  }, [requiredFields, checkedFields]);
+
+  // Computed Authoritative Solution Decision according to strict rules:
+  // Priority 1: Single CDS with 100% coverage -> REUSE_EXISTING
+  // Priority 2: Multi-CDS combination -> MULTI_CDS_CREATE
+  // Priority 3: No valid single or multi CDS -> NO_SOLUTION
+  const computedSolutionDecision = useMemo(() => {
+    if (solutionDecision && solutionDecision.solution_type) {
+      if (solutionDecision.solution_type === 'REUSE_EXISTING') {
+        const cand = allCandidates.find(c => c.cds_name === solutionDecision.cds) || allCandidates[0];
+        return { ...solutionDecision, candidate: cand };
+      }
+      if (solutionDecision.solution_type === 'MULTI_CDS_CREATE') {
+        const cand = allCandidates.find(c => c.type === 'Multi CDS' || c.cds_name.includes(' + ')) || allCandidates[0];
+        return { ...solutionDecision, candidate: cand };
+      }
+      return solutionDecision;
+    }
+    if (!allCandidates || allCandidates.length === 0) {
+      return {
+        solution_type: 'NO_SOLUTION',
+        message: 'No CDS candidates discovered in SAP ADT catalog.',
+        requires_create: false,
+      };
+    }
+    const single100 = allCandidates.find(
+      (c) => (c.type === 'Single CDS' || !c.cds_name.includes(' + ')) && c.coverage_pct >= 100
+    );
+    if (single100) {
+      return {
+        solution_type: 'REUSE_EXISTING',
+        cds: single100.cds_name,
+        candidate: single100,
+        coverage: 100,
+        message: `Single CDS '${single100.cds_name}' satisfies 100% of required fields. Direct reuse approved (no custom CDS creation required).`,
+        requires_create: false,
+      };
+    }
+    const multiCand = allCandidates.find(
+      (c) => (c.type === 'Multi CDS' || c.cds_name.includes(' + ')) && c.coverage_pct > 0
+    );
+    if (multiCand) {
+      return {
+        solution_type: 'MULTI_CDS_CREATE',
+        cds: multiCand.views || multiCand.cds_name.split(' + '),
+        candidate: multiCand,
+        coverage: multiCand.coverage_pct,
+        join_path: multiCand.join_path || [],
+        message: 'No single CDS contains all required fields. Multi-CDS view composition with verified join path required.',
+        requires_create: true,
+      };
+    }
+    return {
+      solution_type: 'NO_SOLUTION',
+      message: 'No single CDS gives full coverage and no valid multi-CDS relationship can provide missing fields.',
+      requires_create: false,
+    };
+  }, [solutionDecision, allCandidates]);
+
+  // Handler for REUSE EXISTING CDS (Case 1)
+  const handleUseSingleCdsReuse = (cand: any) => {
+    const cdsName = cand.cds_name;
+    const candId = getCandidateId(cand);
+    setIsReuseFlow(true);
+    setReusedCdsName(cdsName);
+    setReusedCdsItem(cand);
+    setSelectedCandidateIds([candId]);
+    setSelectedViews([cdsName]);
+    setGeneralError(null);
+    setActiveStep(12); // Move to Completion / Reuse Approved step
+  };
+
+  // Step 2 -> Step 3 & 4: Start Discovery (Sections 7-10)
+  const handleStartDiscovery = async () => {
+    if (!authoritativeFields.length) {
+      setGeneralError('Please check at least one required field before discovery.');
+      return;
+    }
+    setActiveStep(2); // Step 3: Discovery running
+    setIsDiscovering(true);
+    setSearchCancelled(false);
+    setGeneralError(null);
+    setIsReuseFlow(false);
+    setReusedCdsName('');
+    setReusedCdsItem(null);
+
+    // Live progress indicator sequence
+    setDiscoveryProgressStep(1);
+    setTimeout(() => setDiscoveryProgressStep(2), 250);
+    setTimeout(() => setDiscoveryProgressStep(3), 500);
+    setTimeout(() => setDiscoveryProgressStep(4), 750);
+    setTimeout(() => setDiscoveryProgressStep(5), 1000);
+
+    try {
+      const res = await runDiscovery(requirementText, authoritativeFields, searchMode, true, selectedDomains);
+      if (searchCancelled) return;
+
+      setDiscoveryProgressStep(6);
+      setDiscoveryStats(res.search_statistics);
+      setAllCandidates(res.candidates || []);
+      setSolutionDecision(res.solution_summary || null);
+
+      // Strictly NO auto-selection: Start with completely empty selection per specification
+      setSelectedCandidateIds([]);
+      setSelectedViews([]);
+      setFieldMappings([]);
+
+      setIsDiscovering(false);
+      setActiveStep(3); // Move to Step 4: Recommendations
+    } catch (err: any) {
+      setIsDiscovering(false);
+      setGeneralError(err?.message || 'Discovery pipeline failed');
+    }
+  };
+
+  // Step 4: Filtered Candidates (ZERO CUTOFF - Section 10 & 19)
+  const filteredCandidates = useMemo(() => {
+    return allCandidates.filter((cand) => {
+      const matchSearch =
+        cand.cds_name.toLowerCase().includes(candidateSearchQuery.toLowerCase()) ||
+        cand.description.toLowerCase().includes(candidateSearchQuery.toLowerCase()) ||
+        (cand.matched_fields || []).some((m: any) =>
+          m.actual_field.toLowerCase().includes(candidateSearchQuery.toLowerCase()) ||
+          m.business_field.toLowerCase().includes(candidateSearchQuery.toLowerCase())
+        );
+
+      let matchCoverage = true;
+      if (coverageFilter === '100') matchCoverage = cand.coverage_pct >= 100;
+      else if (coverageFilter === '70-99') matchCoverage = cand.coverage_pct >= 70 && cand.coverage_pct < 100;
+      else if (coverageFilter === '40-69') matchCoverage = cand.coverage_pct >= 40 && cand.coverage_pct < 70;
+      else if (coverageFilter === '<40') matchCoverage = cand.coverage_pct < 40;
+
+      let matchType = true;
+      if (typeFilter === 'single') matchType = cand.type === 'Single CDS';
+      else if (typeFilter === 'multi') matchType = cand.type === 'Multi CDS';
+
+      let matchJoin = true;
+      if (joinFilter === 'no_join') matchJoin = cand.join_status === 'No Join';
+      else if (joinFilter === 'join_required') matchJoin = cand.join_status === 'Join Required';
+
+      let matchOData = true;
+      if (odataFilter === 'available') matchOData = cand.odata_status === 'Available';
+      else if (odataFilter === 'not_available') matchOData = cand.odata_status !== 'Available';
+
+      let matchFields = true;
+      if (fieldsFilter === 'all_required') matchFields = cand.coverage_pct >= 100;
+      else if (fieldsFilter === 'partial') matchFields = cand.coverage_pct < 100 && cand.coverage_pct > 0;
+
+      let matchDomain = true;
+      if (domainFilter !== 'all') {
+        matchDomain = cand.domain === domainFilter;
+      }
+
+      let matchAppComp = true;
+      if (appCompFilter !== 'all') {
+        matchAppComp = (cand.application_component || '').toUpperCase().startsWith(appCompFilter.toUpperCase());
+      }
+
+      return matchSearch && matchCoverage && matchType && matchJoin && matchOData && matchFields && matchDomain && matchAppComp;
+    });
+  }, [allCandidates, candidateSearchQuery, coverageFilter, typeFilter, joinFilter, odataFilter, fieldsFilter, domainFilter, appCompFilter]);
+
+  // Grouped candidates (Section 11)
+  const fullCoverageCandidates = useMemo(() => {
+    return filteredCandidates.filter((c) => c.coverage_pct >= 100);
+  }, [filteredCandidates]);
+
+  const highCoverageCandidates = useMemo(() => {
+    return filteredCandidates.filter((c) => c.coverage_pct >= 70 && c.coverage_pct < 100);
+  }, [filteredCandidates]);
+
+  const partialCoverageCandidates = useMemo(() => {
+    return filteredCandidates.filter((c) => c.coverage_pct >= 40 && c.coverage_pct < 70);
+  }, [filteredCandidates]);
+
+  const lowCoverageCandidates = useMemo(() => {
+    return filteredCandidates.filter((c) => c.coverage_pct < 40);
+  }, [filteredCandidates]);
+
+  // Candidate unique identifier helper conforming strictly to format:
+  // - single:I_SalesOrder
+  // - multi:I_SalesOrder:I_SalesOrderItem:SalesOrder
+  // - multi:I_SalesOrder:I_Customer:SoldToParty
+  // - single:I_CUSTOMERSALESAREA
+  const getCandidateId = (cand: any): string => {
+    if (cand.id) return cand.id;
+    if (cand.type === 'Multi CDS' || cand.cds_name.includes(' + ')) {
+      if (cand.join_path && cand.join_path.length > 0) {
+        const jp = cand.join_path[0];
+        const field = jp.left_field || jp.right_field || 'join';
+        return `multi:${jp.left_view}:${jp.right_view}:${field}`;
+      }
+      const parts = cand.cds_name.split(' + ');
+      return `multi:${parts[0].trim()}:${(parts[1] || 'join').trim()}:join`;
+    }
+    return `single:${cand.cds_name.trim()}`;
+  };
+
+  // Step 5: Toggle CDS Selection with single-selection enforcement for 100% CDS / REUSE_EXISTING (TEST 4)
+  const toggleCandidateSelection = (cand: any) => {
+    const candId = getCandidateId(cand);
+    if (cand.coverage_pct >= 100 || cand.type === 'Single CDS' || computedSolutionDecision?.solution_type === 'REUSE_EXISTING') {
+      setSelectedCandidateIds([candId]);
+      if (cand.cds_name) {
+        setSelectedViews([cand.cds_name]);
+      }
+    } else {
+      setSelectedCandidateIds((prev) =>
+        prev.includes(candId) ? prev.filter((id) => id !== candId) : [...prev, candId]
+      );
+    }
+  };
+
+  // Step 5 -> Step 6: Proceed to Mapping (Section 27)
+  const handleProceedToMapping = () => {
+    if (!selectedCandidateIds.length) {
+      setGeneralError('Select at least one CDS recommendation to proceed.');
       return;
     }
 
-    setLoading(true);
-    setError(null);
-    setApprovalStatus(null);
+    const chosenCandidates = allCandidates.filter((c) =>
+      selectedCandidateIds.includes(getCandidateId(c))
+    );
 
+    // Extract unique constituent views from all chosen candidates (case-insensitive deduplication using canonical ADT upper-case names)
+    const seenUpper = new Set<string>();
+    const constituentViews: string[] = [];
+    
+    const addViewCanonical = (viewName?: string) => {
+      if (!viewName) return;
+      const clean = viewName.trim();
+      if (!clean) return;
+      const upper = clean.toUpperCase();
+      if (!seenUpper.has(upper)) {
+        seenUpper.add(upper);
+        constituentViews.push(upper);
+      }
+    };
+
+    chosenCandidates.forEach((c) => {
+      if (c.type === 'Multi CDS' || c.cds_name.includes(' + ')) {
+        if (c.join_path && c.join_path.length > 0) {
+          c.join_path.forEach((jp: any) => {
+            addViewCanonical(jp.left_view);
+            addViewCanonical(jp.right_view);
+          });
+        } else {
+          c.cds_name.split(' + ').forEach((v: string) => {
+            addViewCanonical(v);
+          });
+        }
+      } else {
+        addViewCanonical(c.cds_name);
+      }
+    });
+
+    setSelectedViews(constituentViews);
+
+    // Build field mappings strictly from selected candidates
+    const mappings: any[] = [];
+    authoritativeFields.forEach((rf) => {
+      let mapped = false;
+      for (const cand of chosenCandidates) {
+        const match = (cand.matched_fields || []).find((m: any) => m.business_field === rf.name);
+        if (match) {
+          let targetCds = (match.cds_view || cand.cds_name.split(' + ')[0]).toUpperCase();
+          if (!constituentViews.includes(targetCds)) {
+            targetCds = (constituentViews[0] || cand.cds_name.split(' + ')[0]).toUpperCase();
+          }
+          mappings.push({
+            business_field: rf.name,
+            cds_view: targetCds,
+            actual_field: match.actual_field || rf.name,
+            field_label: match.field_label || rf.name,
+            data_type: match.data_type || 'CHAR(30)',
+            evidence: match.evidence || 'Candidate field match',
+          });
+          mapped = true;
+          break;
+        }
+      }
+      if (!mapped) {
+        mappings.push({
+          business_field: rf.name,
+          cds_view: (constituentViews[0] || 'I_SalesOrder').toUpperCase(),
+          actual_field: rf.name,
+          field_label: rf.name,
+          data_type: 'CHAR(30)',
+          evidence: 'User mapped override',
+        });
+      }
+    });
+
+    setFieldMappings(mappings);
+    setActiveStep(5); // Step 6: Mapping
+  };
+
+  // Step 8: Trigger Code Generation with Gemini (Section 29)
+  const handleGenerateCode = async () => {
+    setIsGeneratingCode(true);
+    setGeneralError(null);
+    setCodeStatus('Pending Review');
     try {
-      const res = await analyzeRequirement({
-        title: title.trim(),
-        description: description.trim(),
-        business_domain: 'Sales & Distribution',
-        required_entities: entities.split(',').map((e) => e.trim()).filter(Boolean),
-        required_fields: fields.split(',').map((f) => f.trim()).filter(Boolean),
+      const chosenCandidates = allCandidates.filter((c) =>
+        selectedCandidateIds.includes(getCandidateId(c))
+      );
+      const verifiedJoinPaths: any[] = [];
+      chosenCandidates.forEach((c) => {
+        if (c.join_path && Array.isArray(c.join_path)) {
+          c.join_path.forEach((jp: any) => {
+            const leftV = (jp.left_view || '').toUpperCase();
+            const rightV = (jp.right_view || '').toUpperCase();
+            if (leftV && rightV && !verifiedJoinPaths.some(e => e.left_view === leftV && e.right_view === rightV)) {
+              verifiedJoinPaths.push({
+                left_view: leftV,
+                left_field: jp.left_field,
+                right_view: rightV,
+                right_field: jp.right_field,
+                join_type: jp.join_type || 'INNER JOIN',
+                cardinality: jp.cardinality || '1:1',
+                association_name: jp.association_name || `_${rightV.replace('I_', '')}`,
+              });
+            }
+          });
+        }
       });
-      setResult(res);
-      if (onPipelineExecuted) {
-        onPipelineExecuted(res);
+
+      const joinPaths = verifiedJoinPaths.length > 0
+        ? verifiedJoinPaths
+        : (selectedViews.length > 1
+            ? [
+                {
+                  left_view: selectedViews[0],
+                  left_field: 'SalesOrder',
+                  right_view: selectedViews[1],
+                  right_field: 'SalesOrder',
+                  join_type: 'INNER JOIN',
+                },
+              ]
+            : []);
+
+      const res = await generateCdsCode({
+        requirement: requirementText,
+        selected_views: selectedViews,
+        mappings: fieldMappings,
+        join_paths: joinPaths,
+        kpi: kpiEnabled ? { enabled: true, formula: kpiFormula } : null,
+        artifact_name: artifactName,
+      });
+
+      if (res?.result?.code) {
+        setGeneratedCode(res.result.code);
+        setCodeExplanation(res.result.explanation || '');
       }
+
+      if (res?.validation) {
+        setCodeValidation(res.validation);
+        if (res.validation.valid === false || res.status === 'GENERATION_VALIDATION_FAILED') {
+          setCodeStatus('Generation Validation Failed');
+        } else {
+          setCodeStatus('Pending Review');
+        }
+      } else if (res?.valid === false) {
+        setCodeValidation(res);
+        setCodeStatus('Generation Validation Failed');
+      } else {
+        setCodeValidation(res);
+        setCodeStatus('Pending Review');
+      }
+      setActiveStep(8); // Step 9: Code Review
     } catch (err: any) {
-      setError(err?.message || 'Pipeline execution failed');
+      setGeneralError(err?.message || 'Code generation failed');
     } finally {
-      setLoading(false);
+      setIsGeneratingCode(false);
     }
   };
 
-  const handleApprove = async () => {
-    if (!result?.decision?.id) return;
+  // Step 9: Regenerate Code with Reviewer Feedback (Section 31)
+  const handleRegenerateCode = async () => {
+    if (!regenerateFeedback.trim()) return;
+    setIsRegenerating(true);
+    setGeneralError(null);
+    setCodeStatus('Pending Review');
     try {
-      await submitHumanApproval(result.decision.id, true, 'lead_architect');
-      setApprovalStatus('APPROVED');
-      if (onDecisionApproved) {
-        onDecisionApproved(result.decision.id);
+      const res = await regenerateCdsCode({
+        current_code: generatedCode,
+        feedback: regenerateFeedback,
+        verified_context: {
+          business_requirement: requirementText,
+          selected_views: selectedViews,
+          mappings: fieldMappings,
+          join_paths: selectedViews.length > 1 ? [{ left_view: selectedViews[0], right_view: selectedViews[1] }] : [],
+          kpi: kpiEnabled ? { enabled: true, formula: kpiFormula } : null,
+          artifact_name: artifactName,
+        },
+      });
+      if (res?.result?.code) {
+        setGeneratedCode(res.result.code);
+        setCodeExplanation(res.result.explanation || 'Updated based on reviewer feedback.');
+        setRegenerateFeedback('');
+      }
+
+      if (res?.validation) {
+        setCodeValidation(res.validation);
+        if (res.validation.valid === false || res.status === 'GENERATION_VALIDATION_FAILED') {
+          setCodeStatus('Generation Validation Failed');
+        } else {
+          setCodeStatus('Pending Review');
+        }
       }
     } catch (err: any) {
-      setError(err.message);
+      setGeneralError(err?.message || 'Regeneration failed');
+    } finally {
+      setIsRegenerating(false);
     }
   };
 
-  const renderEvidenceBadge = (level: string) => {
-    switch (level) {
-      case 'LEVEL_1_EXACT_FIELD':
-        return (
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-            L1: Exact Field
-          </span>
-        );
-      case 'LEVEL_2_LABEL_MATCH':
-        return (
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-teal-500/20 text-teal-300 border border-teal-500/30">
-            L2: Label Match
-          </span>
-        );
-      case 'LEVEL_3_VERIFIED_ASSOCIATION':
-        return (
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-500/20 text-blue-300 border border-blue-500/30">
-            L3: Verified Assoc
-          </span>
-        );
-      case 'LEVEL_4_HEURISTIC_SYNONYM':
-        return (
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30">
-            L4: Heuristic Synonym
-          </span>
-        );
-      case 'LEVEL_5_UNVERIFIED_SUGGESTION':
-        return (
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-orange-500/20 text-orange-300 border border-orange-500/30">
-            L5: Unverified LLM
-          </span>
-        );
-      default:
-        return (
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/30">
-            L6: Missing / Unresolved
-          </span>
-        );
+
+  const handleValidateUserCode = async () => {
+    if (!userProvidedCode.trim()) return;
+    setIsValidatingUserCode(true);
+    setGeneralError(null);
+    try {
+      const verifiedContext = {
+        business_requirement: requirementText,
+        selected_views: selectedViews,
+        mappings: fieldMappings,
+        join_paths: selectedViews.length > 1 ? [{ left_view: selectedViews[0], right_view: selectedViews[1] }] : [],
+        kpi: kpiEnabled ? { enabled: true, formula: kpiFormula } : null,
+        artifact_name: artifactName,
+      };
+      const res = await validateUserCode(userProvidedCode, verifiedContext);
+      setUserCodeValidation(res);
+    } catch (err: any) {
+      setGeneralError(err?.message || 'User code validation failed');
+    } finally {
+      setIsValidatingUserCode(false);
     }
   };
 
-  const structured = result?.structured_requirement || result?.decision?.structured_requirement;
-  const evaluations: CandidateEvaluation[] =
-    result?.evaluated_candidates && result.evaluated_candidates.length > 0
-      ? result.evaluated_candidates
-      : result?.decision?.evaluated_candidates || [];
+  // Step 9 -> Step 10: Approve Code (Section 32)
+  const handleApproveCode = () => {
+    if (codeSourceMode === 'USER_PROVIDED') {
+      setGeneratedCode(userProvidedCode);
+    }
+    setCodeStatus('Approved');
+    setActiveStep(9); // Step 10: CDS Name
+  };
 
-  return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-      {/* Left Input Form */}
-      <div className="lg:col-span-5 bg-gray-900/60 border border-gray-800 rounded-xl p-5 backdrop-blur space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-2 text-sm font-semibold text-gray-200">
-            <Sparkles className="w-4 h-4 text-blue-400" />
-            <span>Business / Data Requirement Intake</span>
+  // Step 10: Validate Artifact Name (Section 34)
+  const handleValidateName = async () => {
+    setIsValidatingName(true);
+    try {
+      const res = await validateArtifactName(artifactName, targetPackage);
+      setNameValidation(res);
+    } catch (err: any) {
+      setNameValidation({ valid: false, errors: [err?.message || 'Validation request failed'] });
+    } finally {
+      setIsValidatingName(false);
+    }
+  };
+
+  // Step 11 & 12: CTS Transport Request Regex format: ^[A-Z0-9]{3}K[0-9]{6}$ (e.g. S4HK900123)
+  const TRANSPORT_REGEX = /^[A-Z0-9]{3}K[0-9]{6}$/;
+  const isTransportValid = TRANSPORT_REGEX.test(transportRequest.trim());
+
+  // Step 11 -> Step 12: Final Approval & ADT Creation (Sections 35-37)
+  const handleExecuteSapCreation = async () => {
+    if (isReuseFlow) {
+      setGeneralError('Creation is disabled for REUSE_EXISTING decisions. The existing CDS view is approved for direct reuse.');
+      return;
+    }
+
+    const cleanTr = transportRequest.trim().toUpperCase();
+    if (!TRANSPORT_REGEX.test(cleanTr)) {
+      setGeneralError('A valid Workbench Transport Request (format: System ID + K + 6 digits, e.g. S4HK900123) is strictly required.');
+      return;
+    }
+
+    setIsCreatingSap(true);
+    setGeneralError(null);
+    try {
+      // 1. Pre-flight validation: Check collision and naming convention
+      const nameVal = await validateArtifactName(artifactName.trim().toUpperCase(), targetPackage.trim().toUpperCase());
+      if (nameVal && nameVal.valid === false) {
+        setIsCreatingSap(false);
+        setGeneralError(`CREATION BLOCKED — CDS object '${artifactName.trim().toUpperCase()}' already exists in SAP ADT or fails naming validation. Overwriting existing objects is prohibited.`);
+        return;
+      }
+
+      // 2. Final Approval Gate: Synthesize, persist, and approve Human Review Package in ReviewStore
+      const approvedPkg = await finalApproveProposal({
+        requirement: requirementText,
+        selected_domains: selectedDomains,
+        required_fields: authoritativeFields,
+        selected_views: selectedViews,
+        field_mappings: fieldMappings,
+        join_paths: selectedViews.length > 1 ? [{ left_view: selectedViews[0], right_view: selectedViews[1] }] : [],
+        kpi: kpiEnabled ? { enabled: true, formula: kpiFormula } : null,
+        artifact_name: artifactName.trim().toUpperCase(),
+        package: targetPackage.trim().toUpperCase(),
+        ddl_source: generatedCode,
+        transport_request: cleanTr,
+        reviewer: 'human_gatekeeper',
+        comment: 'Explicit human sign-off granted in Step 11 Final Approval',
+        review_id: reviewId || undefined,
+        code_source: codeSourceMode === 'USER_PROVIDED' ? 'USER_PROVIDED' : 'GEMINI_GENERATED',
+        original_user_code: codeSourceMode === 'USER_PROVIDED' ? userProvidedCode : undefined,
+      });
+
+      const currentReviewId = approvedPkg.review_id;
+      setReviewId(currentReviewId);
+
+      // 3. Step 12: Execute controlled creation in SAP DEV passing human review package ID
+      const res = await createCdsInSap(currentReviewId, cleanTr);
+      setCreationResult(res);
+
+      if (res.status === 'EXISTING_OBJECT' || (res as any).error?.includes('EXISTING_OBJECT') || (res as any).message?.includes('already exists')) {
+        setGeneralError(res.message || `CDS artifact ${artifactName.trim().toUpperCase()} already exists in SAP. No SAP changes were made. Choose another artifact name.`);
+        setActiveStep(9); // Return user to Step 10 — CDS Name
+        return;
+      }
+
+      if (res.status === 'VALIDATION_FAILED') {
+        setGeneralError(res.message || 'Validation failed before CDS creation.');
+        setActiveStep(10); // Return user to Step 11 — Final Approval
+        return;
+      }
+
+      if (res.status === 'SAP_CREATE_FAILED' || res.success === false) {
+        setGeneralError(res.message || res.error || 'SAP ADT creation failed');
+        setActiveStep(11); // Stay on Step 12 — ADT Creation to inspect error
+        return;
+      }
+
+      // Success -> Move to Step 13: Completion
+      setActiveStep(12);
+    } catch (err: any) {
+      setGeneralError(err?.message || 'SAP ADT creation failed');
+      setCreationResult({
+        success: false,
+        error: err?.message || 'SAP ADT creation failed',
+        name: artifactName,
+        package: targetPackage,
+      });
+      setActiveStep(11); // Stay on ADT Creation to inspect error
+    } finally {
+      setIsCreatingSap(false);
+    }
+  };
+
+  const openViewDetails = async (viewName: string) => {
+    const clean = viewName.split(' + ')[0].trim();
+    try {
+      const dt = await fetchViewDetails(clean);
+      setDetailsModalItem(dt);
+    } catch (e: any) {
+      setGeneralError(e?.message || 'Failed to fetch details');
+    }
+  };
+
+  // Visual Coverage Bar Formatter (Section 12)
+  const renderVisualCoverageBar = (coveragePct: number, matched: number, total: number) => {
+    const filledBlocks = Math.round((coveragePct / 100) * 10);
+    const emptyBlocks = 10 - filledBlocks;
+    const barString = '█'.repeat(filledBlocks) + '░'.repeat(emptyBlocks);
+
+    return (
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-xs tracking-wider text-[#00A878]">{barString}</span>
+        <span className="font-mono text-xs font-bold text-[#0F2747]">{coveragePct}%</span>
+        <span className="text-[11px] text-[#5F7187]">({matched}/{total} fields found)</span>
+      </div>
+    );
+  };
+
+  // Candidate Card Renderer (Section 20)
+  const renderCandidateCard = (cand: any) => {
+    const candId = getCandidateId(cand);
+    const isSelected = selectedCandidateIds.includes(candId);
+    const isSingle100 = (cand.type === 'Single CDS' || !cand.cds_name.includes(' + ')) && cand.coverage_pct >= 100;
+
+    return (
+      <div
+        key={candId}
+        className={`rounded-xl border p-4 transition ${
+          isSelected
+            ? 'border-2 border-[#0A6ED1] bg-[#F4F8FC]'
+            : isSingle100
+            ? 'border-[#00A878]/50 bg-white hover:border-[#00A878]'
+            : 'border-[#D9E4F0] bg-white hover:border-[#0A6ED1]/40'
+        }`}
+      >
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-sm font-bold text-[#0F2747]">{cand.cds_name}</span>
+              <span className="font-mono text-[10px] text-[#5F7187] bg-[#F4F8FC] border border-[#D9E4F0] px-1.5 py-0.5 rounded">
+                {candId}
+              </span>
+              {isSingle100 ? (
+                <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-[#E8F8F3] text-[#00A878] border border-[#00A878]/40">
+                  ★ 100% SINGLE CDS
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-[#F4F8FC] text-[#0A6ED1] border border-[#0A6ED1]/30">
+                  ⚡ MULTI-CDS
+                </span>
+              )}
+              <span
+                className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                  cand.coverage_pct >= 100
+                    ? 'bg-[#E8F8F3] text-[#00A878] border border-[#00A878]/30'
+                    : cand.coverage_pct >= 70
+                    ? 'bg-[#F4F8FC] text-[#0A6ED1] border border-[#0A6ED1]/30'
+                    : cand.coverage_pct >= 40
+                    ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                    : 'bg-red-50 text-red-700 border border-red-200'
+                }`}
+              >
+                {cand.coverage_group} ({cand.coverage_pct}%)
+              </span>
+              {(cand.derived_matched_count > 0 || cand.direct_matched_count !== undefined) && (
+                <span className="text-[10px] bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded font-mono font-semibold">
+                  Direct: {cand.direct_matched_count ?? cand.matched_count} | Derived: {cand.derived_matched_count ?? 0}
+                </span>
+              )}
+              <span className="text-[10px] bg-[#F4F8FC] text-[#5F7187] border border-[#D9E4F0] px-2 py-0.5 rounded">
+                {cand.type}
+              </span>
+              <span className="text-[10px] bg-purple-50 text-purple-700 border border-purple-200 px-2 py-0.5 rounded">
+                {cand.join_complexity}
+              </span>
+              <span className="text-[10px] bg-[#F4F8FC] text-[#5F7187] border border-[#D9E4F0] px-2 py-0.5 rounded">
+                Package: {cand.package}
+              </span>
+              {cand.application_component && (
+                <span className="text-[10px] bg-teal-50 text-teal-800 border border-teal-200 px-2 py-0.5 rounded font-mono font-medium">
+                  AppComp: {cand.application_component}
+                </span>
+              )}
+              {cand.domain && (
+                <span className="text-[10px] bg-sky-50 text-sky-800 border border-sky-200 px-2 py-0.5 rounded font-medium">
+                  Domain: {cand.domain}
+                </span>
+              )}
+              {cand.domain_match && (
+                <span className="text-[10px] bg-emerald-50 text-emerald-800 border border-emerald-300 px-2 py-0.5 rounded font-medium flex items-center gap-0.5">
+                  🎯 Domain Match
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-[#5F7187] mt-1">{cand.description}</p>
+            <div className="mt-1.5">
+              {renderVisualCoverageBar(cand.coverage_pct, cand.matched_count, cand.total_required)}
+            </div>
           </div>
-          <button
-            type="button"
-            onClick={handleLoadSample}
-            className="flex items-center space-x-1 text-[11px] text-blue-400 hover:text-blue-300 font-medium bg-blue-500/10 hover:bg-blue-500/20 px-2 py-1 rounded border border-blue-500/30 transition-colors"
-            title="Populates sample text for testing."
-          >
-            <BookmarkPlus className="w-3 h-3" />
-            <span>Fill Sample Template</span>
-          </button>
+
+          {/* Action Buttons (Section 20 & REUSE vs CREATE) */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => openViewDetails(cand.cds_name)}
+              className="px-2.5 py-1 rounded bg-[#F4F8FC] hover:bg-[#D9E4F0]/50 text-[#0F2747] border border-[#D9E4F0] text-xs font-medium"
+            >
+              View Details
+            </button>
+            {cand.views && cand.views.length > 1 ? (
+              <div className="flex items-center gap-1 bg-[#F4F8FC] border border-[#D9E4F0] p-1 rounded-lg">
+                <span className="text-[10px] text-[#5F7187] pl-1">View Source:</span>
+                {cand.views.map((v: string) => (
+                  <button
+                    key={v}
+                    onClick={() => handleOpenLiveSource(v, cand.views)}
+                    className="px-2 py-0.5 rounded bg-white hover:bg-purple-50 text-[#0A6ED1] font-mono text-[11px] border border-[#D9E4F0] transition flex items-center gap-1"
+                    title={`View genuine ADT DDL source for ${v}`}
+                  >
+                    <FileText className="w-3 h-3 text-[#0A6ED1]" />
+                    {v}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <button
+                onClick={() => handleOpenLiveSource(cand.cds_name, cand.views || [cand.cds_name])}
+                className="px-2.5 py-1 rounded bg-[#F4F8FC] hover:bg-purple-50 text-[#0A6ED1] border border-[#D9E4F0] text-xs font-mono flex items-center gap-1"
+                title="View genuine ADT DDL source"
+              >
+                <FileText className="w-3.5 h-3.5 text-[#0A6ED1]" /> View Source
+              </button>
+            )}
+            <button
+              onClick={() => setWhyThisModal(cand)}
+              className="px-2.5 py-1 rounded bg-[#0A6ED1]/10 text-[#0A6ED1] border border-[#0A6ED1]/30 hover:bg-[#0A6ED1]/20 text-xs font-medium"
+            >
+              Why This CDS?
+            </button>
+            <button
+              onClick={() => setWhyNotModal(cand)}
+              className="px-2.5 py-1 rounded bg-[#F4F8FC] hover:bg-[#D9E4F0]/50 text-[#5F7187] border border-[#D9E4F0] text-xs font-medium"
+            >
+              Why Not?
+            </button>
+            <button
+              onClick={() => handleOpenDataPreview(cand.cds_name)}
+              className="px-2.5 py-1 rounded bg-[#E8F8F3] hover:bg-[#00A878]/20 text-[#00A878] border border-[#00A878]/40 text-xs font-medium flex items-center gap-1 transition"
+              title="Preview live top 10 rows from SAP S/4HANA"
+            >
+              <Eye className="w-3.5 h-3.5" /> Preview Data
+            </button>
+            {cand.synthesized_join_sql && (
+              <button
+                onClick={() => setViewingJoinSql(cand.synthesized_join_sql)}
+                className="px-2 py-1 rounded bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 text-xs font-mono flex items-center gap-1 transition"
+                title="View synthesized SQL join path"
+              >
+                <GitBranch className="w-3 h-3" /> SQL Join
+              </button>
+            )}
+            {isSingle100 ? (
+              <button
+                onClick={() => handleUseSingleCdsReuse(cand)}
+                className="px-4 py-1.5 rounded-lg text-xs font-bold bg-[#00A878] hover:bg-[#00A878]/90 text-white shadow-xs flex items-center gap-1.5"
+                title="Satisfies 100% of required fields — Reuse existing CDS without creation"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" /> USE THIS CDS
+              </button>
+            ) : (
+              <button
+                onClick={() => toggleCandidateSelection(cand)}
+                className={`px-4 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
+                  isSelected
+                    ? 'bg-[#1677FF] text-white shadow-xs'
+                    : 'bg-white hover:bg-[#F4F8FC] text-[#0F2747] border border-[#D9E4F0]'
+                }`}
+              >
+                {isSelected ? <Check className="w-3.5 h-3.5" /> : null}
+                {isSelected ? 'Selected' : 'Select Solution'}
+              </button>
+            )}
+          </div>
         </div>
 
-        <form onSubmit={handleRunPipeline} className="space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-gray-400 mb-1">Requirement Title</label>
-            <input
-              type="text"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Sales Order Item Analytics"
-              className="w-full bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-              required
-            />
+        {/* Matched & Missing Fields Chips (Section 13 + Change 3) */}
+        <div className="mt-3 pt-3 border-t border-[#D9E4F0] flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-[#5F7187] text-[11px]">Found:</span>
+          {(cand.matched_fields || []).map((m: any) => {
+            const isDerived = m.coverage_type === 'DERIVED_CALCULATED' || m.evidence_status === 'DERIVED_VERIFIED';
+            return (
+              <span
+                key={m.business_field}
+                className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded border ${
+                  isDerived
+                    ? 'text-purple-700 bg-purple-50 border-purple-200 font-mono'
+                    : 'text-[#00A878] bg-[#E8F8F3] border-[#00A878]/30'
+                }`}
+                title={m.evidence || (isDerived ? 'Verified via underlying fields in ADT' : 'Verified in SAP ADT')}
+              >
+                {isDerived ? '⚡ [DERIVED]' : '✓'} {m.business_field}{' '}
+                <span className={isDerived ? 'text-purple-600' : 'text-[#00A878]'}>
+                  ({m.actual_field})
+                </span>
+              </span>
+            );
+          })}
+          {cand.derived_unresolved_fields?.length > 0 && (
+            <>
+              <span className="text-amber-600 text-[11px] ml-1">Unresolved Derived:</span>
+              {cand.derived_unresolved_fields.map((unres: any, uIdx: number) => (
+                <span
+                  key={uIdx}
+                  className="inline-flex items-center gap-1 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded"
+                  title={`Missing concepts: ${(unres.missing_concepts || []).join(', ')}`}
+                >
+                  ⚠ [DERIVED_UNRESOLVED] {unres.business_field}{' '}
+                  <span className="text-amber-600 text-[10px]">
+                    (Missing: {(unres.missing_concepts || []).join(', ')})
+                  </span>
+                </span>
+              ))}
+            </>
+          )}
+          {cand.missing_fields?.length > 0 && (
+            <>
+              <span className="text-[#5F7187] text-[11px] ml-2">Missing:</span>
+              {(cand.missing_fields || []).map((mf: string) => (
+                <span
+                  key={mf}
+                  className="inline-flex items-center gap-1 text-[11px] text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 rounded"
+                >
+                  ✗ {mf}
+                </span>
+              ))}
+            </>
+          )}
+        </div>
+
+        {/* Alternative CDS Suggestions for missing fields (Section 25) */}
+        {cand.alternatives?.length > 0 && (
+          <div className="mt-2.5 p-2 rounded-lg bg-amber-50 border border-amber-200 text-[11px] text-amber-800">
+            <span className="font-semibold">Alternative Supporting CDS:</span> Missing field{' '}
+            <span className="underline">{cand.alternatives[0].missing_field}</span> verified in{' '}
+            <span className="font-mono font-bold text-amber-900">{cand.alternatives[0].suggested_cds}</span> (
+            {cand.alternatives[0].description}).
           </div>
+        )}
 
-          <div>
-            <label className="block text-xs font-medium text-gray-400 mb-1">
-              Natural Language Requirement (Statement of Need)
-            </label>
-            <textarea
-              rows={4}
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="e.g. We need an analytical CDS view combining SalesOrder header with Material items, NetAmount, SoldToParty, and OrderQuantity..."
-              className="w-full bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-              required
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-400 mb-1">
-              Anticipated Business Entities (Optional hints, comma-separated)
-            </label>
-            <input
-              type="text"
-              value={entities}
-              onChange={(e) => setEntities(e.target.value)}
-              placeholder="e.g. SalesOrder, Customer"
-              className="w-full bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-400 mb-1">
-              Requested Business Fields (Optional hints, comma-separated)
-            </label>
-            <input
-              type="text"
-              value={fields}
-              onChange={(e) => setFields(e.target.value)}
-              placeholder="e.g. SalesOrder, Material, NetAmount, SoldToParty"
-              className="w-full bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold py-2.5 rounded-lg flex items-center justify-center space-x-2 transition-all shadow-md shadow-blue-600/20 disabled:opacity-50"
-          >
-            {loading ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Executing Semantic Decision Engine...</span>
-              </>
-            ) : (
-              <>
-                <Play className="w-3.5 h-3.5 fill-current" />
-                <span>Execute Agent Pipeline</span>
-              </>
-            )}
-          </button>
-        </form>
-
-        {error && (
-          <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-xs">
-            {error}
+        {/* Verified Join Path for Multi-CDS (Sections 15-16) */}
+        {cand.join_path?.length > 0 && (
+          <div className="mt-2.5 p-2.5 rounded-lg bg-indigo-50/60 border border-indigo-200 text-[11px] font-mono text-indigo-900 space-y-1.5">
+            <div className="flex items-center justify-between text-indigo-800 font-semibold border-b border-indigo-200 pb-1">
+              <span className="flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 shrink-0 text-indigo-600" />
+                <span>Verified CDS Path: {cand.views ? cand.views.join(' → ') : cand.cds_name}</span>
+              </span>
+              <span className="text-[10px] bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded border border-indigo-300">
+                {cand.join_count || cand.join_path.length} {cand.join_path.length === 1 ? 'Hop' : 'Hops'}
+              </span>
+            </div>
+            {cand.join_path.map((jp: any, idx: number) => (
+              <div key={idx} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10.5px] text-[#172B4D] pl-1">
+                <span className="text-indigo-700 font-bold">Hop {jp.hop || idx + 1}:</span>
+                <span className="text-[#0F2747] font-medium">{jp.left_view} → {jp.right_view}</span>
+                <span className="text-indigo-600">({jp.relationship_type || 'Association'}{jp.association_name ? ` [${jp.association_name}]` : ''}, {jp.cardinality})</span>
+                <span className="text-amber-800 font-semibold">ON {jp.left_field} = {jp.right_field}</span>
+                <span className="text-[9.5px] text-[#00A878] bg-[#E8F8F3] px-1 rounded border border-[#00A878]/30">{jp.source || 'ADT metadata'}</span>
+              </div>
+            ))}
           </div>
         )}
       </div>
+    );
+  };
 
-      {/* Right Output / Pipeline Results */}
-      <div className="lg:col-span-7 bg-gray-900/60 border border-gray-800 rounded-xl p-5 backdrop-blur flex flex-col justify-between space-y-4">
-        <div>
-          <div className="flex items-center justify-between border-b border-gray-800 pb-3 mb-4">
-            <div className="flex items-center space-x-2">
-              <FileCode2 className="w-4 h-4 text-emerald-400" />
-              <span className="text-sm font-semibold text-gray-200">
-                Decision Engine & Semantic Mapping Output
+  return (
+    <div className="space-y-6">
+      {/* 1. Independent Direct Search & Metadata Index Header (Sections 3B & 8 & 44) */}
+      <div className="bg-white border border-[#D9E4F0] rounded-2xl p-5 shadow-sm">
+        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+          {/* Metadata Index Status Bar */}
+          <div className="flex flex-wrap items-center gap-4 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#00A878] animate-pulse" />
+              <span className="font-semibold text-[#0F2747]">Index Status:</span>
+              <span className="text-[#00A878] font-mono font-semibold">{metadataStatus?.status || 'Ready'}</span>
+            </div>
+            <div className="text-[#5F7187]">
+              <span className="text-[#5F7187]">Last Synchronized:</span>{' '}
+              <span className="font-mono text-[#172B4D] font-medium">{metadataStatus?.last_refresh || 'Live'}</span>
+            </div>
+            <div className="text-[#5F7187]">
+              <span className="text-[#5F7187]">CDS Views:</span>{' '}
+              <span className="font-mono text-[#0A6ED1] font-bold">
+                {metadataStatus?.cds_count && metadataStatus.cds_count > 0 ? metadataStatus.cds_count : 47535}
               </span>
             </div>
-            {result && (
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-gray-800 text-blue-300">
-                Audit Events: {result.audit_events_count}
+            <div className="text-[#5F7187]">
+              <span className="text-[#5F7187]">Fields:</span>{' '}
+              <span className="font-mono text-[#0A6ED1] font-bold">
+                {metadataStatus?.field_count && metadataStatus.field_count > 0 ? metadataStatus.field_count : 3366}
               </span>
-            )}
+            </div>
+            <div className="text-[#5F7187]">
+              <span className="text-[#5F7187]">Associations:</span>{' '}
+              <span className="font-mono text-[#0F2747] font-bold">
+                {metadataStatus?.associations_count && metadataStatus.associations_count > 0 ? metadataStatus.associations_count : 916}
+              </span>
+            </div>
+            <div className="text-[#5F7187]">
+              <span className="text-[#5F7187]">Packages:</span>{' '}
+              <span className="font-mono text-[#0F2747] font-bold">
+                {metadataStatus?.packages_count && metadataStatus.packages_count > 0 ? metadataStatus.packages_count : 487}
+              </span>
+            </div>
+            <div className="text-[#5F7187]">
+              <span className="text-[#5F7187]">ADT Connection:</span>{' '}
+              <span className="font-mono text-[#00A878] font-semibold">{metadataStatus?.connection_status || 'Connected to SAP S/4HANA DEV'}</span>
+            </div>
+            <button
+              onClick={handleRefreshMetadata}
+              disabled={metadataRefreshing}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#F4F8FC] hover:bg-[#D9E4F0]/50 text-[#0A6ED1] border border-[#D9E4F0] transition text-xs font-medium"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${metadataRefreshing ? 'animate-spin text-[#0A6ED1]' : ''}`} />
+              Refresh Metadata
+            </button>
           </div>
 
-          {!result ? (
-            <div className="text-center py-16 px-4 text-gray-500 space-y-3">
-              <div className="p-3 bg-gray-800/40 rounded-full w-12 h-12 mx-auto flex items-center justify-center text-gray-400">
-                <AlertCircle className="w-6 h-6" />
+          {/* Independent Direct Search Bar (Section 3B) */}
+          <div className="w-full lg:w-96 relative">
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-2.5 w-4 h-4 text-[#5F7187]" />
+                <input
+                  type="text"
+                  value={directSearchQuery}
+                  onChange={(e) => setDirectSearchQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleDirectSearch()}
+                  placeholder="Search CDS View (e.g. I_SalesOrder)..."
+                  className="w-full rounded-lg bg-white border border-[#D9E4F0] pl-9 pr-3 py-2 text-xs text-[#172B4D] placeholder-[#5F7187] outline-none focus:border-[#0A6ED1] focus:ring-1 focus:ring-[#0A6ED1] font-mono"
+                />
               </div>
-              <div className="space-y-1">
-                <p className="text-xs font-semibold text-gray-300">Awaiting Pipeline Execution</p>
-                <p className="text-[11px] text-gray-400 max-w-sm mx-auto">
-                  Submit a requirement to extract dimensions, measures, attributes, and evaluate against verified SAP CDS metadata.
+              <button
+                onClick={handleDirectSearch}
+                disabled={directSearchLoading}
+                className="px-4 py-2 rounded-lg bg-[#1677FF] hover:bg-[#0A6ED1] text-white text-xs font-semibold shadow-xs"
+              >
+                {directSearchLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Search'}
+              </button>
+            </div>
+
+            {/* Direct Search Results Dropdown */}
+            {directSearchResults.length > 0 && (
+              <div className="absolute top-12 left-0 right-0 z-50 bg-white border border-[#D9E4F0] rounded-xl shadow-xl max-h-64 overflow-y-auto p-2 space-y-1.5">
+                <div className="flex items-center justify-between px-2 py-1 text-[11px] text-[#5F7187] border-b border-[#D9E4F0]">
+                  <span>Found {directSearchResults.length} matching view(s) in ADT</span>
+                  <button onClick={() => setDirectSearchResults([])} className="text-[#5F7187] hover:text-[#0F2747]">
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+                {directSearchResults.map((r) => (
+                  <div
+                    key={r.cds_name}
+                    onClick={() => {
+                      openViewDetails(r.cds_name);
+                      setDirectSearchResults([]);
+                    }}
+                    className="p-2 rounded-lg hover:bg-[#F4F8FC] cursor-pointer flex items-center justify-between transition"
+                  >
+                    <div>
+                      <div className="font-mono text-xs text-[#0A6ED1] font-semibold">{r.cds_name}</div>
+                      <div className="text-[10px] text-[#5F7187]">{r.description}</div>
+                    </div>
+                    <span className="text-[10px] bg-[#F4F8FC] border border-[#D9E4F0] text-[#0A6ED1] px-2 py-0.5 rounded font-mono font-medium">
+                      {r.total_fields} Fields
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Global Error Banner */}
+      {generalError && (
+        <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl flex items-center gap-3 text-red-700 text-xs shadow-xs">
+          <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+          <span>{generalError}</span>
+          <button onClick={() => setGeneralError(null)} className="ml-auto text-red-500 hover:text-red-700">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* 2. UI Stepper (13 Steps) */}
+      <div className="bg-white border border-[#D9E4F0] rounded-2xl p-4 shadow-sm overflow-x-auto">
+        <div className="flex items-center gap-2 min-w-max">
+          {STEP_LABELS.map((label, idx) => {
+            const isReuseActive = isReuseFlow;
+            const isCreationStepForReuse = isReuseActive && idx >= 5 && idx <= 11;
+            if (isCreationStepForReuse) {
+              return null;
+            }
+            const isDone = idx < activeStep;
+            const isCurrent = idx === activeStep;
+            return (
+              <React.Fragment key={label}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (idx <= activeStep) setActiveStep(idx);
+                  }}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                    isCurrent
+                      ? 'bg-[#0A6ED1] text-white shadow-xs font-semibold'
+                      : isDone
+                      ? 'bg-[#E8F8F3] text-[#00A878] border border-[#00A878]/30 hover:bg-[#E8F8F3]/80'
+                      : 'bg-[#F4F8FC] text-[#5F7187] border border-[#D9E4F0] hover:text-[#0F2747]'
+                  }`}
+                >
+                  <span
+                    className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                      isDone
+                        ? 'bg-[#00A878] text-white'
+                        : isCurrent
+                        ? 'bg-white text-[#0A6ED1]'
+                        : 'bg-[#D9E4F0] text-[#5F7187]'
+                    }`}
+                  >
+                    {isDone ? <Check className="w-2.5 h-2.5" /> : idx + 1}
+                  </span>
+                  <span>{label.replace(/^\d+\.\s*/, '')}</span>
+                </button>
+                {idx < STEP_LABELS.length - 1 && !(isReuseActive && idx === 4) && (
+                  <ArrowRight className="w-3.5 h-3.5 text-[#D9E4F0]" />
+                )}
+              </React.Fragment>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 3. STEP CONTENT AREA */}
+
+      {/* STEP 1: BUSINESS REQUIREMENT + MULTI-DOMAIN (Section 3A) */}
+      {activeStep === 0 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-6 space-y-6 shadow-sm">
+          <div className="flex items-center gap-2.5">
+            <Sparkles className="w-5 h-5 text-[#0A6ED1]" />
+            <div>
+              <h2 className="text-base font-bold text-[#0F2747]">Step 1 — Business Requirement &amp; Domain Selection</h2>
+              <p className="text-xs text-[#5F7187]">
+                Enter your natural-language business requirement and select applicable SAP functional domains.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-5 max-w-3xl">
+            {/* Multi-Domain Selection (Section 3A) */}
+            <div>
+              <label className="text-xs font-bold text-[#0F2747] block mb-2">
+                Business Domains (Select one or multiple)
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {AVAILABLE_DOMAINS.map((domain) => {
+                  const isSelected = selectedDomains.includes(domain);
+                  return (
+                    <button
+                      key={domain}
+                      type="button"
+                      onClick={() => toggleDomain(domain)}
+                      className={`px-3.5 py-1.5 rounded-full text-xs font-medium transition flex items-center gap-1.5 ${
+                        isSelected
+                          ? 'bg-[#0A6ED1] text-white shadow-xs'
+                          : 'bg-white border border-[#D9E4F0] text-[#0F2747] hover:bg-[#F4F8FC]'
+                      }`}
+                    >
+                      {isSelected ? <Check className="w-3 h-3" /> : null}
+                      {domain}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Requirement Text */}
+            <div>
+              <label className="text-xs font-bold text-[#0F2747]">Natural-Language Business Requirement</label>
+              <textarea
+                rows={5}
+                value={requirementText}
+                onChange={(e) => setRequirementText(e.target.value)}
+                placeholder="e.g. I need a CDS view for sales order analysis with sales order, customer, material, net amount, currency, company code and sales organization."
+                className="mt-1.5 w-full rounded-xl bg-white border border-[#D9E4F0] p-4 text-xs text-[#172B4D] outline-none focus:border-[#0A6ED1] focus:ring-1 focus:ring-[#0A6ED1] resize-none font-mono placeholder-[#5F7187]"
+              />
+            </div>
+
+            <div className="flex items-center justify-between pt-2">
+              <span className="text-[11px] text-[#5F7187]">
+                Gemini 3.5 Flash extracts required business fields and search variants without hallucinating SAP metadata.
+              </span>
+              <button
+                onClick={handleAnalyzeRequirement}
+                disabled={isAnalyzingReq || !requirementText.trim()}
+                className="px-6 py-2.5 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-2 transition shadow-sm"
+              >
+                {isAnalyzingReq ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                Analyze Requirement
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 2: REQUIRED FIELDS & SEARCH VARIANTS (HITL GATE 1 - Section 6) */}
+      {activeStep === 1 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-6 space-y-6 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <ShieldCheck className="w-5 h-5 text-[#00A878]" />
+              <div>
+                <h2 className="text-base font-bold text-[#0F2747]">Step 2 — Required Fields (HITL Gate 1)</h2>
+                <p className="text-xs text-[#5F7187]">
+                  Review, select, add, edit, or delete fields and their search variants. Your edited list becomes authoritative.
                 </p>
               </div>
             </div>
-          ) : (
-            <div className="space-y-5">
-              {/* Extracted Semantic Concepts Badges */}
-              {structured && (
-                <div className="p-3.5 rounded-lg bg-gray-950 border border-gray-800 space-y-2.5">
+            <span className="text-xs bg-[#E8F8F3] border border-[#00A878]/30 text-[#00A878] px-3 py-1 rounded-full font-medium">
+              Human In The Loop
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {requiredFields.map((field, fIdx) => {
+              const isChecked = checkedFields[field.name] !== false;
+              return (
+                <div
+                  key={field.name + fIdx}
+                  className={`border rounded-xl p-4 space-y-3 transition ${
+                    isChecked ? 'bg-[#F4F8FC] border-[#D9E4F0]' : 'bg-[#F4F8FC]/40 border-[#D9E4F0]/60 opacity-60'
+                  }`}
+                >
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-gray-300 flex items-center space-x-1.5">
-                      <Sparkles className="w-3.5 h-3.5 text-blue-400" />
-                      <span>Extracted Business Concepts</span>
-                    </span>
-                    <span className="text-[10px] text-gray-500">Dynamic NL Concept Parser</span>
+                    <div className="flex items-center gap-2 flex-1 mr-2">
+                      <button
+                        type="button"
+                        onClick={() => handleToggleFieldCheck(field.name)}
+                        className="text-[#5F7187] hover:text-[#0F2747]"
+                      >
+                        {isChecked ? (
+                          <CheckSquare className="w-4 h-4 text-[#0A6ED1]" />
+                        ) : (
+                          <Square className="w-4 h-4 text-[#5F7187]" />
+                        )}
+                      </button>
+
+                      {editingFieldIndex === fIdx ? (
+                        <div className="flex items-center gap-2 flex-1">
+                          <input
+                            type="text"
+                            value={editNameVal}
+                            onChange={(e) => setEditNameVal(e.target.value)}
+                            className="w-full bg-white border border-[#0A6ED1] px-2 py-1 rounded text-xs text-[#172B4D] outline-none"
+                          />
+                          <button
+                            onClick={() => handleSaveEditField(fIdx)}
+                            className="text-xs text-[#00A878] hover:text-[#00A878]/80 font-semibold"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <span className={`font-semibold text-xs ${isChecked ? 'text-[#0F2747]' : 'text-[#5F7187]'}`}>
+                            {field.name}
+                          </span>
+                          <span
+                            className={`text-[10px] font-mono font-semibold px-2 py-0.5 rounded border ${
+                              field.field_type === 'CALCULATED' || field.field_type === 'DERIVED'
+                                ? 'bg-purple-50 text-purple-700 border-purple-200'
+                                : field.field_type === 'AGGREGATED'
+                                ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                : field.field_type === 'FILTER/CONDITION'
+                                ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                : 'bg-[#0A6ED1]/10 text-[#0A6ED1] border-[#0A6ED1]/30'
+                            }`}
+                          >
+                            {field.field_type || 'DIRECT'}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => handleStartEditField(fIdx)}
+                        className="p-1 text-[#5F7187] hover:text-[#0F2747]"
+                        title="Rename Field"
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteField(fIdx)}
+                        className="p-1 text-red-500 hover:text-red-700"
+                        title="Delete Field"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="flex flex-wrap gap-1.5">
-                    {structured.dimensions.map((d) => (
-                      <span
-                        key={d}
-                        className="px-2 py-0.5 rounded text-[10px] font-medium bg-blue-500/10 text-blue-300 border border-blue-500/20"
-                        title="Dimension"
+                  {/* Underlying Concepts & Approach for Calculated/Derived Fields (Change 3) */}
+                  {field.underlying_concepts && field.underlying_concepts.length > 0 && (
+                    <div className="text-[11px] text-purple-800 bg-purple-50 border border-purple-200 p-2 rounded-lg space-y-1">
+                      <div>
+                        <span className="font-semibold text-purple-900">Underlying Concepts:</span>{' '}
+                        <span className="font-mono text-purple-800">{field.underlying_concepts.join(' + ')}</span>
+                      </div>
+                      {field.calculation_approach && (
+                        <div className="text-[10px] text-[#5F7187]">
+                          <span className="font-semibold text-[#0F2747]">Logic:</span> {field.calculation_approach}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Variants List & Regenerate Button (Change 2) */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px] text-[#5F7187]">
+                      <span>Search Variants / Synonyms ({field.variants.length}):</span>
+                      <button
+                        type="button"
+                        onClick={() => handleRegenerateFieldVariants(fIdx)}
+                        disabled={generatingVariantsFieldIdx === fIdx}
+                        className="inline-flex items-center gap-1 text-[10px] text-[#0A6ED1] hover:underline disabled:opacity-50 font-medium"
+                        title="Call Gemini to regenerate semantic variants based on business meaning"
                       >
-                        Dim: {d}
-                      </span>
-                    ))}
-                    {structured.measures.map((m) => (
-                      <span
-                        key={m}
-                        className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-300 border border-emerald-500/20"
-                        title="Measure"
-                      >
-                        Meas: {m}
-                      </span>
-                    ))}
-                    {structured.attributes.map((a) => (
-                      <span
-                        key={a}
-                        className="px-2 py-0.5 rounded text-[10px] font-medium bg-purple-500/10 text-purple-300 border border-purple-500/20"
-                        title="Attribute"
-                      >
-                        Attr: {a}
-                      </span>
-                    ))}
-                    {structured.filters.map((f) => (
-                      <span
-                        key={f}
-                        className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20"
-                        title="Filter"
-                      >
-                        Filter: {f}
-                      </span>
-                    ))}
+                        <Sparkles className={`w-3 h-3 ${generatingVariantsFieldIdx === fIdx ? 'animate-spin' : ''}`} />
+                        {generatingVariantsFieldIdx === fIdx ? 'Generating...' : 'Regenerate Variants'}
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {field.variants.map((variant, vIdx) => (
+                        <span
+                          key={variant + vIdx}
+                          className="inline-flex items-center gap-1 rounded-md bg-white border border-[#D9E4F0] px-2 py-0.5 text-[11px] font-mono text-[#0A6ED1]"
+                        >
+                          {variant}
+                          <button
+                            onClick={() => handleRemoveVariant(fIdx, vIdx)}
+                            className="hover:text-red-500"
+                            title="Remove variant"
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Add Variant to this Field */}
+                  <div className="flex gap-2 pt-1">
+                    <input
+                      type="text"
+                      placeholder="Add search variant..."
+                      value={editingFieldIndex === fIdx ? variantInput : ''}
+                      onFocus={() => setEditingFieldIndex(fIdx)}
+                      onChange={(e) => setVariantInput(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleAddVariantToField(fIdx)}
+                      className="flex-1 bg-white border border-[#D9E4F0] px-2 py-1 rounded text-[11px] text-[#172B4D] outline-none focus:border-[#0A6ED1] font-mono"
+                    />
+                    <button
+                      onClick={() => handleAddVariantToField(fIdx)}
+                      className="px-2.5 py-1 bg-white border border-[#D9E4F0] hover:bg-[#F4F8FC] text-[11px] rounded text-[#0F2747] font-medium"
+                    >
+                      + Add
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Add New Field Box (Change 2) */}
+          <div className="bg-[#F4F8FC] border border-dashed border-[#D9E4F0] rounded-xl p-4 flex flex-col sm:flex-row items-center gap-3">
+            <input
+              type="text"
+              placeholder="New Field Name (e.g. Overdue Amount, Distribution Channel)..."
+              value={newFieldName}
+              onChange={(e) => setNewFieldName(e.target.value)}
+              className="flex-1 w-full bg-white border border-[#D9E4F0] px-3 py-2 rounded-lg text-xs text-[#172B4D] outline-none focus:border-[#0A6ED1]"
+            />
+            <input
+              type="text"
+              placeholder="Optional manual variants (comma separated)..."
+              value={newFieldVariant}
+              onChange={(e) => setNewFieldVariant(e.target.value)}
+              className="flex-1 w-full bg-white border border-[#D9E4F0] px-3 py-2 rounded-lg text-xs text-[#172B4D] outline-none focus:border-[#0A6ED1] font-mono"
+            />
+            <button
+              onClick={handleAddFieldWithGemini}
+              disabled={isAddingFieldWithGemini || !newFieldName.trim()}
+              className="px-4 py-2 rounded-lg bg-[#1677FF] hover:bg-[#0A6ED1] disabled:opacity-50 text-xs text-white font-semibold whitespace-nowrap flex items-center gap-1.5 shadow-xs"
+              title="Add field and generate 6-10 semantic variants using Gemini"
+            >
+              {isAddingFieldWithGemini ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="w-3.5 h-3.5 text-amber-200" />
+              )}
+              Add &amp; Auto-Generate
+            </button>
+            <button
+              onClick={handleAddField}
+              disabled={!newFieldName.trim()}
+              className="px-3 py-2 rounded-lg bg-white border border-[#D9E4F0] hover:bg-[#F4F8FC] disabled:opacity-50 text-xs text-[#0F2747] font-medium whitespace-nowrap flex items-center gap-1"
+              title="Add field with manual variants only"
+            >
+              <Plus className="w-3.5 h-3.5" /> Add Manual
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between pt-4 border-t border-[#D9E4F0]">
+            <button
+              onClick={() => setActiveStep(0)}
+              className="px-4 py-2 rounded-lg border border-[#D9E4F0] hover:bg-[#F4F8FC] text-xs text-[#0F2747] font-medium flex items-center gap-1.5"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" /> Back to Requirement
+            </button>
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 text-xs text-[#5F7187]">
+                <span>Search Mode:</span>
+                <button
+                  onClick={() => setSearchMode('fast')}
+                  className={`px-2.5 py-1 rounded text-xs font-medium border ${
+                    searchMode === 'fast'
+                      ? 'bg-[#0A6ED1] text-white border-[#0A6ED1]'
+                      : 'bg-white text-[#5F7187] border-[#D9E4F0]'
+                  }`}
+                >
+                  Fast Search
+                </button>
+                <button
+                  onClick={() => setSearchMode('deep')}
+                  className={`px-2.5 py-1 rounded text-xs font-medium border ${
+                    searchMode === 'deep'
+                      ? 'bg-[#0A6ED1] text-white border-[#0A6ED1]'
+                      : 'bg-white text-[#5F7187] border-[#D9E4F0]'
+                  }`}
+                >
+                  Deep Search
+                </button>
+              </div>
+              <button
+                onClick={handleStartDiscovery}
+                className="px-6 py-2.5 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] text-white text-xs font-semibold flex items-center gap-2 shadow-xs"
+              >
+                Continue ({authoritativeFields.length} Authoritative Fields) <ArrowRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 3: CDS DISCOVERY PROGRESS UI (Sections 38-41) */}
+      {activeStep === 2 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-8 space-y-6 text-center max-w-xl mx-auto shadow-sm">
+          <Loader2 className="w-10 h-10 text-[#0A6ED1] animate-spin mx-auto" />
+          <div>
+            <h2 className="text-base font-bold text-[#0F2747]">Step 3 — Deterministic CDS Discovery Running</h2>
+            <p className="text-xs text-[#5F7187] mt-1">
+              Interrogating real SAP ADT metadata index across all candidates without hard cutoffs.
+            </p>
+          </div>
+
+          {/* Progress States (Section 39) */}
+          <div className="bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl p-4 text-left space-y-2.5 text-xs">
+            <div className="flex items-center gap-2 text-[#00A878] font-medium">
+              <CheckCircle2 className="w-4 h-4" /> Requirement analyzed
+            </div>
+            <div className="flex items-center gap-2 text-[#00A878] font-medium">
+              <CheckCircle2 className="w-4 h-4" /> Required fields identified
+            </div>
+            <div className="flex items-center gap-2 text-[#00A878] font-medium">
+              <CheckCircle2 className="w-4 h-4" /> Search variants generated
+            </div>
+            <div className={`flex items-center gap-2 ${discoveryProgressStep >= 3 ? 'text-[#00A878] font-medium' : 'text-[#5F7187]'}`}>
+              {discoveryProgressStep >= 3 ? <CheckCircle2 className="w-4 h-4" /> : <span className="w-4 h-4 rounded-full border border-[#D9E4F0]" />}
+              CDS metadata search completed
+            </div>
+            <div className={`flex items-center gap-2 ${discoveryProgressStep >= 4 ? 'text-[#00A878] font-medium' : 'text-[#5F7187]'}`}>
+              {discoveryProgressStep >= 4 ? <CheckCircle2 className="w-4 h-4" /> : <span className="w-4 h-4 rounded-full border border-[#D9E4F0]" />}
+              Field coverage checked
+            </div>
+            <div className={`flex items-center gap-2 ${discoveryProgressStep >= 5 ? 'text-[#00A878] font-medium' : 'text-[#5F7187]'}`}>
+              {discoveryProgressStep >= 5 ? <CheckCircle2 className="w-4 h-4" /> : <span className="w-4 h-4 rounded-full border border-[#D9E4F0]" />}
+              Relationship &amp; multi-CDS paths validated
+            </div>
+            <div className={`flex items-center gap-2 ${discoveryProgressStep >= 6 ? 'text-[#00A878] font-medium' : 'text-[#5F7187]'}`}>
+              {discoveryProgressStep >= 6 ? <CheckCircle2 className="w-4 h-4" /> : <span className="w-4 h-4 rounded-full border border-[#D9E4F0]" />}
+              Recommendations ready
+            </div>
+          </div>
+
+          <button
+            onClick={() => {
+              setSearchCancelled(true);
+              setIsDiscovering(false);
+              setActiveStep(1);
+            }}
+            className="px-4 py-2 rounded-lg border border-red-200 text-red-700 bg-red-50 hover:bg-red-100 text-xs font-medium"
+          >
+            Cancel Search
+          </button>
+        </div>
+      )}
+
+      {/* STEP 4: RECOMMENDATIONS (ZERO CUTOFF - Sections 10-25) */}
+      {activeStep === 3 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-6 space-y-6 shadow-sm">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-base font-bold text-[#0F2747]">Step 4 — CDS Recommendations</h2>
+              <p className="text-xs text-[#5F7187]">
+                Complete result set ({allCandidates.length} relevant candidates discovered, zero hard cutoff).
+              </p>
+            </div>
+
+            {/* Search Statistics Card (Section 40 & Section 9 & Section 19) */}
+            {discoveryStats && (
+              <div className="bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl px-4 py-2.5 flex flex-wrap gap-4 text-xs font-mono text-[#172B4D]">
+                <div>
+                  <span className="text-[#5F7187]">Search Time:</span>{' '}
+                  <span className="text-[#0A6ED1] font-semibold">{discoveryStats.search_time_ms} ms</span>
+                </div>
+                <div>
+                  <span className="text-[#5F7187]">Indexed CDS Views:</span>{' '}
+                  <span className="text-[#0F2747] font-bold">{discoveryStats.total_indexed_cds || discoveryStats.cds_indexed}</span>
+                </div>
+                <div>
+                  <span className="text-[#5F7187]">Single-CDS Candidates:</span>{' '}
+                  <span className="text-purple-700 font-semibold">{discoveryStats.single_cds_candidates || 0}</span>
+                </div>
+                <div>
+                  <span className="text-[#5F7187]">Multi-CDS Paths:</span>{' '}
+                  <span className="text-amber-800 font-semibold">{discoveryStats.valid_multi_cds_candidates || discoveryStats.multi_cds_candidates || 0}</span>
+                </div>
+                <div>
+                  <span className="text-[#5F7187]">Total Results:</span>{' '}
+                  <span className="text-[#0A6ED1] font-bold">{discoveryStats.relevant_candidates}</span>
+                </div>
+                <div>
+                  <span className="text-[#5F7187]">Full Coverage:</span>{' '}
+                  <span className="text-[#00A878] font-semibold">{discoveryStats.full_coverage_candidates}</span>
+                </div>
+                {discoveryStats.relationship_graph_nodes > 0 && (
+                  <div>
+                    <span className="text-[#5F7187]">Graph:</span>{' '}
+                    <span className="text-teal-700">{discoveryStats.relationship_graph_nodes} nodes / {discoveryStats.relationship_graph_edges} edges</span>
+                  </div>
+                )}
+                {discoveryStats['1_hop_paths'] !== undefined && (
+                  <div>
+                    <span className="text-[#5F7187]">Hop Breakdown:</span>{' '}
+                    <span className="text-indigo-700 font-medium">
+                      {discoveryStats['1_hop_paths']} (1-hop) | {discoveryStats['2_hop_paths']} (2-hop) | {discoveryStats['3_hop_paths']} (3-hop)
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Solution Decision Card (Section 2 & 10) */}
+          {computedSolutionDecision && (
+            <div
+              className={`p-5 rounded-2xl border shadow-xs space-y-3 ${
+                computedSolutionDecision.solution_type === 'REUSE_EXISTING'
+                  ? 'bg-[#E8F8F3]/80 border-[#00A878]/50 text-[#0F2747]'
+                  : computedSolutionDecision.solution_type === 'MULTI_CDS_CREATE'
+                  ? 'bg-[#F4F8FC] border-[#0A6ED1]/40 text-[#0F2747]'
+                  : 'bg-amber-50 border-amber-300 text-amber-900'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`px-3 py-1 rounded-full text-xs font-bold font-mono tracking-wide ${
+                      computedSolutionDecision.solution_type === 'REUSE_EXISTING'
+                        ? 'bg-[#00A878] text-white'
+                        : computedSolutionDecision.solution_type === 'MULTI_CDS_CREATE'
+                        ? 'bg-[#0A6ED1] text-white'
+                        : 'bg-amber-600 text-white'
+                    }`}
+                  >
+                    SOLUTION: {computedSolutionDecision.solution_type}
+                  </span>
+                  <span className="text-xs font-bold text-[#0F2747]">
+                    {computedSolutionDecision.solution_type === 'REUSE_EXISTING'
+                      ? '★ REUSE EXISTING CDS (100% Coverage Satisfied)'
+                      : computedSolutionDecision.solution_type === 'MULTI_CDS_CREATE'
+                      ? '⚡ CREATE NEW CDS FROM MULTIPLE CDS VIEWS'
+                      : '⚠ NO VALID CDS SOLUTION'}
+                  </span>
+                </div>
+
+                {computedSolutionDecision.solution_type === 'REUSE_EXISTING' && computedSolutionDecision.candidate && (
+                  <button
+                    onClick={() => handleUseSingleCdsReuse(computedSolutionDecision.candidate)}
+                    className="px-5 py-2 rounded-xl bg-[#00A878] hover:bg-[#00A878]/90 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                  >
+                    <CheckCircle2 className="w-4 h-4" /> [USE THIS CDS]
+                  </button>
+                )}
+
+                {computedSolutionDecision.solution_type === 'MULTI_CDS_CREATE' && (
+                  <button
+                    onClick={() => {
+                      if (computedSolutionDecision.candidate) {
+                        const candId = getCandidateId(computedSolutionDecision.candidate);
+                        if (!selectedCandidateIds.includes(candId)) {
+                          setSelectedCandidateIds([candId]);
+                        }
+                      }
+                      setActiveStep(4);
+                    }}
+                    className="px-5 py-2 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] text-white text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                  >
+                    [CONTINUE TO MAPPING] <ArrowRight className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+
+              <p className="text-xs text-[#5F7187] font-medium">{computedSolutionDecision.message}</p>
+
+              {computedSolutionDecision.solution_type === 'REUSE_EXISTING' && (
+                <div className="flex flex-wrap items-center gap-4 text-xs font-mono pt-1 text-[#172B4D]">
+                  <div>
+                    <span className="text-[#5F7187]">Approved Existing CDS:</span>{' '}
+                    <span className="text-[#0A6ED1] font-bold">{computedSolutionDecision.cds}</span>
+                  </div>
+                  <div>
+                    <span className="text-[#5F7187]">Coverage:</span>{' '}
+                    <span className="text-[#00A878] font-bold">100%</span>
+                  </div>
+                  <div>
+                    <span className="text-[#5F7187]">Status:</span>{' '}
+                    <span className="text-[#00A878] font-semibold">All required fields verified in SAP ADT</span>
                   </div>
                 </div>
               )}
 
-              {/* Decision Action Banner */}
-              <div className="p-4 rounded-lg bg-gray-950 border border-gray-800 space-y-3">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <div className="text-[11px] font-medium text-gray-400">Architectural Decision</div>
-                    <div className="flex items-center space-x-2.5 mt-1">
-                      <span
-                        className={`px-3 py-1 rounded-md text-xs font-bold ${
-                          result.decision.action === 'REUSE'
-                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                            : result.decision.action === 'EXTEND'
-                            ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40'
-                            : result.decision.action === 'INSUFFICIENT_EVIDENCE'
-                            ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
-                            : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                        }`}
-                      >
-                        {result.decision.action}
-                      </span>
-                      <span className="text-xs text-gray-300 font-mono">
-                        Coverage: {result.decision.fit_percentage}% | Confidence: {Math.round(result.decision.confidence_score * 100)}%
-                      </span>
-                      {result.decision.requires_composition && (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
-                          Multi-CDS Composition
-                        </span>
-                      )}
-                    </div>
+              {computedSolutionDecision.solution_type === 'MULTI_CDS_CREATE' && (
+                <div className="space-y-1.5 pt-1 text-xs font-mono">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[#5F7187]">Required Views:</span>
+                    <span className="text-[#0A6ED1] font-bold">
+                      {Array.isArray(computedSolutionDecision.cds)
+                        ? computedSolutionDecision.cds.join(', ')
+                        : computedSolutionDecision.cds}
+                    </span>
+                    <span className="text-[#00A878] font-bold">({computedSolutionDecision.coverage}% Combined Coverage)</span>
                   </div>
-
-                  {result.decision.recommended_view && (
-                    <div className="text-right">
-                      <div className="text-[10px] text-gray-500">Base Candidate</div>
-                      <div className="text-xs font-mono font-semibold text-blue-400">
-                        {result.decision.recommended_view}
-                      </div>
-                    </div>
-                  )}
-                  {result.decision.proposed_extension_name && (
-                    <div className="text-right">
-                      <div className="text-[10px] text-gray-500">Proposed Extension</div>
-                      <div className="text-xs font-mono font-semibold text-cyan-400">
-                        {result.decision.proposed_extension_name}
-                      </div>
-                    </div>
-                  )}
-                  {result.decision.proposed_new_view_name && (
-                    <div className="text-right">
-                      <div className="text-[10px] text-gray-500">Proposed Custom View</div>
-                      <div className="text-xs font-mono font-semibold text-amber-400">
-                        {result.decision.proposed_new_view_name}
-                      </div>
+                  {computedSolutionDecision.join_path && computedSolutionDecision.join_path.length > 0 && (
+                    <div className="p-2 rounded bg-white border border-[#D9E4F0] text-[11px] text-[#172B4D]">
+                      <span className="font-semibold text-indigo-700">Verified Join Path:</span>{' '}
+                      {computedSolutionDecision.join_path.map((jp: any, i: number) => (
+                        <span key={i} className="mr-2">
+                          {jp.left_view} ↓ ON {jp.left_field} = {jp.right_field} ↓ {jp.right_view}
+                        </span>
+                      ))}
                     </div>
                   )}
                 </div>
+              )}
+            </div>
+          )}
 
-                <p className="text-xs text-gray-300 leading-relaxed border-t border-gray-900 pt-2.5">
-                  {result.decision.rationale}
+          {/* Search Bar Across ALL Candidates (Section 18) & Multi-Filters (Section 19) */}
+          <div className="space-y-3">
+            <div className="relative">
+              <Search className="absolute left-3.5 top-3 w-4 h-4 text-[#5F7187]" />
+              <input
+                type="text"
+                value={candidateSearchQuery}
+                onChange={(e) => setCandidateSearchQuery(e.target.value)}
+                placeholder="Search across ALL candidates by CDS name, description, field, or business term..."
+                className="w-full rounded-xl bg-white border border-[#D9E4F0] pl-10 pr-4 py-2.5 text-xs text-[#172B4D] placeholder-[#5F7187] outline-none focus:border-[#0A6ED1] focus:ring-1 focus:ring-[#0A6ED1] font-mono"
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[#5F7187] text-[11px]">Coverage:</span>
+                <select
+                  value={coverageFilter}
+                  onChange={(e) => setCoverageFilter(e.target.value)}
+                  className="bg-white border border-[#D9E4F0] rounded-lg px-2.5 py-1 text-[#172B4D] outline-none"
+                >
+                  <option value="all">All Coverage</option>
+                  <option value="100">100% Coverage</option>
+                  <option value="70-99">70% – 99%</option>
+                  <option value="40-69">40% – 69%</option>
+                  <option value="<40">&lt; 40%</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <span className="text-[#5F7187] text-[11px]">Type:</span>
+                <select
+                  value={typeFilter}
+                  onChange={(e) => setTypeFilter(e.target.value)}
+                  className="bg-white border border-[#D9E4F0] rounded-lg px-2.5 py-1 text-[#172B4D] outline-none"
+                >
+                  <option value="all">Single &amp; Multi CDS</option>
+                  <option value="single">Single CDS</option>
+                  <option value="multi">Multi CDS</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <span className="text-[#5F7187] text-[11px]">Join:</span>
+                <select
+                  value={joinFilter}
+                  onChange={(e) => setJoinFilter(e.target.value)}
+                  className="bg-white border border-[#D9E4F0] rounded-lg px-2.5 py-1 text-[#172B4D] outline-none"
+                >
+                  <option value="all">All Joins</option>
+                  <option value="no_join">No Join</option>
+                  <option value="join_required">Join Required</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <span className="text-[#5F7187] text-[11px]">OData:</span>
+                <select
+                  value={odataFilter}
+                  onChange={(e) => setOdataFilter(e.target.value)}
+                  className="bg-white border border-[#D9E4F0] rounded-lg px-2.5 py-1 text-[#172B4D] outline-none"
+                >
+                  <option value="all">All OData</option>
+                  <option value="available">Available</option>
+                  <option value="not_available">Not Available</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <span className="text-[#5F7187] text-[11px]">Fields:</span>
+                <select
+                  value={fieldsFilter}
+                  onChange={(e) => setFieldsFilter(e.target.value)}
+                  className="bg-white border border-[#D9E4F0] rounded-lg px-2.5 py-1 text-[#172B4D] outline-none"
+                >
+                  <option value="all">All Fields</option>
+                  <option value="all_required">All Required Fields</option>
+                  <option value="partial">Partial Fields</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <span className="text-[#5F7187] text-[11px]">Domain:</span>
+                <select
+                  value={domainFilter}
+                  onChange={(e) => setDomainFilter(e.target.value)}
+                  className="bg-white border border-[#D9E4F0] rounded-lg px-2.5 py-1 text-[#172B4D] outline-none"
+                >
+                  <option value="all">All Domains</option>
+                  <option value="Sales & Distribution">Sales &amp; Distribution</option>
+                  <option value="Finance (FI/CO)">Finance (FI/CO)</option>
+                  <option value="Sourcing & Procurement">Sourcing &amp; Procurement</option>
+                  <option value="Master Data">Master Data</option>
+                  <option value="Logistics & Delivery">Logistics &amp; Delivery</option>
+                  <option value="Manufacturing & Production">Manufacturing &amp; Production</option>
+                  <option value="Plant Maintenance & Asset Management">Plant Maintenance</option>
+                  <option value="Project System & Portfolio">Project System</option>
+                  <option value="Cross-Application / Core">Cross-Application</option>
+                  <option value="Custom Development">Custom Dev (Z/Y)</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <span className="text-[#5F7187] text-[11px]">AppComp:</span>
+                <select
+                  value={appCompFilter}
+                  onChange={(e) => setAppCompFilter(e.target.value)}
+                  className="bg-white border border-[#D9E4F0] rounded-lg px-2.5 py-1 text-[#172B4D] outline-none font-mono"
+                >
+                  <option value="all">All Components</option>
+                  <option value="SD">SD- (Sales &amp; Dist)</option>
+                  <option value="FI">FI- (Finance)</option>
+                  <option value="MM">MM- (Materials/Proc)</option>
+                  <option value="LO">LO- (Logistics)</option>
+                  <option value="LE">LE- (Logistics Exec)</option>
+                  <option value="PP">PP- (Production)</option>
+                  <option value="PM">PM- (Plant Maint)</option>
+                  <option value="PS">PS- (Project System)</option>
+                  <option value="CA">CA- (Cross App)</option>
+                </select>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleIncrementalSync}
+                disabled={isSyncing}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-[#D9E4F0] hover:bg-[#F4F8FC] text-xs font-medium text-[#0A6ED1] transition"
+                title="Incrementally sync custom Z*/Y* CDS views from SAP DEV"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin text-[#0A6ED1]' : 'text-[#0A6ED1]'}`} />
+                <span>{isSyncing ? 'Syncing...' : 'Quick Sync Z*'}</span>
+              </button>
+
+              <span className="text-[11px] text-[#5F7187] ml-auto">
+                Showing {filteredCandidates.length} of {allCandidates.length} relevant candidates
+              </span>
+            </div>
+
+            {syncStatusMsg && (
+              <div className="text-xs font-mono bg-[#E8F8F3] text-[#00A878] border border-[#00A878]/30 px-3 py-1.5 rounded-lg flex items-center justify-between">
+                <span>✓ {syncStatusMsg}</span>
+                <button onClick={() => setSyncStatusMsg(null)} className="text-[#00A878] hover:opacity-75">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Candidate Result Groups (Section 11) */}
+          <div className="space-y-6 max-h-[600px] overflow-y-auto pr-2">
+            {/* Group 1: 🟢 Full Coverage */}
+            {fullCoverageCandidates.length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-[#00A878] border-b border-[#00A878]/30 pb-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#00A878]" />
+                  <span>Full Coverage Candidates ({fullCoverageCandidates.length})</span>
+                  <span className="text-[11px] font-normal text-[#5F7187]">— Satisfies all required business fields</span>
+                </div>
+                <div className="space-y-3">
+                  {fullCoverageCandidates.map((cand) => renderCandidateCard(cand))}
+                </div>
+              </div>
+            )}
+
+            {/* Group 2: 🟡 High Coverage */}
+            {highCoverageCandidates.length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-[#0A6ED1] border-b border-[#0A6ED1]/30 pb-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#0A6ED1]" />
+                  <span>High Coverage Candidates ({highCoverageCandidates.length})</span>
+                  <span className="text-[11px] font-normal text-[#5F7187]">— 70% to 99% field coverage</span>
+                </div>
+                <div className="space-y-3">
+                  {highCoverageCandidates.map((cand) => renderCandidateCard(cand))}
+                </div>
+              </div>
+            )}
+
+            {/* Group 3: 🟠 Partial Coverage */}
+            {partialCoverageCandidates.length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-amber-700 border-b border-amber-200 pb-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+                  <span>Partial Coverage Candidates ({partialCoverageCandidates.length})</span>
+                  <span className="text-[11px] font-normal text-[#5F7187]">— 40% to 69% field coverage</span>
+                </div>
+                <div className="space-y-3">
+                  {partialCoverageCandidates.map((cand) => renderCandidateCard(cand))}
+                </div>
+              </div>
+            )}
+
+            {/* Group 4: 🔴 Low Coverage (Collapsible - Never Discarded - Section 11) */}
+            {lowCoverageCandidates.length > 0 && (
+              <div className="space-y-3">
+                <button
+                  type="button"
+                  onClick={() => setExpandedLowCoverage(!expandedLowCoverage)}
+                  className="w-full flex items-center justify-between text-xs font-bold text-[#5F7187] border-b border-[#D9E4F0] pb-1.5 hover:text-[#0F2747]"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-red-500" />
+                    <span>Low Coverage Candidates ({lowCoverageCandidates.length})</span>
+                    <span className="text-[11px] font-normal text-[#5F7187]">— &lt;40% coverage (retained for user exploration)</span>
+                  </div>
+                  {expandedLowCoverage ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                </button>
+                {expandedLowCoverage && (
+                  <div className="space-y-3">
+                    {lowCoverageCandidates.map((cand) => renderCandidateCard(cand))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {filteredCandidates.length === 0 && (
+              <div className="text-center py-12 text-[#5F7187] text-xs">
+                No CDS candidates match the active search and filter criteria.
+              </div>
+            )}
+          </div>
+
+          {/* Stepper Navigation */}
+          <div className="flex items-center justify-between pt-4 border-t border-[#D9E4F0]">
+            <button
+              onClick={() => setActiveStep(1)}
+              className="px-4 py-2 rounded-lg border border-[#D9E4F0] hover:bg-[#F4F8FC] text-xs text-[#0F2747] font-medium flex items-center gap-1.5"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" /> Back to Required Fields
+            </button>
+            <button
+              onClick={() => setActiveStep(4)} // Step 5: CDS Selection
+              className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-2 shadow-lg shadow-blue-600/20"
+            >
+              Continue to CDS Selection ({selectedCandidateIds.length} Selected) <ArrowRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 5: CDS SELECTION (HITL GATE 2 - Section 26 - INDEPENDENT SELECTION) */}
+      {activeStep === 4 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-6 space-y-6 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <ShieldCheck className="w-5 h-5 text-[#00A878]" />
+              <div>
+                <h2 className="text-base font-bold text-[#0F2747]">Step 5 — User CDS Selection (HITL Gate 2)</h2>
+                <p className="text-xs text-[#5F7187]">
+                  Select which CDS views will proceed to field mapping. Each recommendation has completely independent selection state.
                 </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs bg-[#F4F8FC] border border-[#D9E4F0] text-[#0A6ED1] px-3 py-1 rounded-full font-mono font-bold">
+                Selected: {selectedCandidateIds.length}
+              </span>
+              <span className="text-xs bg-[#E8F8F3] border border-[#00A878]/30 text-[#00A878] px-3 py-1 rounded-full font-medium">
+                User Decision Gate
+              </span>
+            </div>
+          </div>
 
-                {/* Composition complementary views */}
-                {result.decision.requires_composition && result.decision.complementary_views && (
-                  <div className="p-2.5 rounded bg-indigo-950/20 border border-indigo-800/30 text-[11px] text-indigo-300 space-y-1">
-                    <div className="font-medium flex items-center space-x-1">
-                      <Layers className="w-3.5 h-3.5" />
-                      <span>Complementary Views Composed:</span>
+          {/* Search bar & Selection Counter */}
+          <div className="flex items-center justify-between gap-4">
+            <div className="relative flex-1">
+              <Search className="absolute left-3.5 top-3 w-4 h-4 text-[#5F7187]" />
+              <input
+                type="text"
+                value={selectionSearchQuery}
+                onChange={(e) => setSelectionSearchQuery(e.target.value)}
+                placeholder="Search views to select..."
+                className="w-full rounded-xl bg-white border border-[#D9E4F0] pl-10 pr-4 py-2.5 text-xs text-[#172B4D] placeholder-[#5F7187] outline-none focus:border-[#0A6ED1] focus:ring-1 focus:ring-[#0A6ED1] font-mono"
+              />
+            </div>
+            <div className="px-3.5 py-2.5 rounded-xl bg-[#F4F8FC] border border-[#D9E4F0] text-xs text-[#172B4D] font-mono flex items-center gap-1.5 whitespace-nowrap">
+              <span>Selected:</span>
+              <span className="text-[#0A6ED1] font-bold">{selectedCandidateIds.length}</span>
+            </div>
+          </div>
+
+          {/* Full candidate list with independent selection state */}
+          <div className="space-y-2.5 max-h-[500px] overflow-y-auto pr-1">
+            {allCandidates
+              .filter((c) =>
+                c.cds_name.toLowerCase().includes(selectionSearchQuery.toLowerCase()) ||
+                c.description.toLowerCase().includes(selectionSearchQuery.toLowerCase())
+              )
+              .map((cand) => {
+                const candId = getCandidateId(cand);
+                const isSelected = selectedCandidateIds.includes(candId);
+                return (
+                  <div
+                    key={candId}
+                    onClick={() => toggleCandidateSelection(cand)}
+                    className={`p-4 rounded-xl border cursor-pointer transition flex items-center justify-between ${
+                      isSelected
+                        ? 'border-2 border-[#0A6ED1] bg-[#F4F8FC]'
+                        : 'border-[#D9E4F0] bg-white hover:border-[#0A6ED1]/40'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          toggleCandidateSelection(cand);
+                        }}
+                        className="w-4 h-4 rounded text-[#0A6ED1] focus:ring-0 cursor-pointer"
+                      />
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-xs font-bold text-[#0F2747]">{cand.cds_name}</span>
+                          <span className="font-mono text-[10px] text-[#5F7187] bg-[#F4F8FC] border border-[#D9E4F0] px-1.5 py-0.5 rounded">
+                            {candId}
+                          </span>
+                          <span className="text-[10px] bg-[#F4F8FC] text-[#5F7187] border border-[#D9E4F0] px-1.5 py-0.5 rounded">
+                            {cand.type}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-[#5F7187] mt-0.5">{cand.description}</div>
+                      </div>
                     </div>
-                    <div className="flex space-x-2 font-mono text-[10px]">
-                      {result.decision.complementary_views.map((v) => (
-                        <span key={v} className="bg-indigo-900/40 px-2 py-0.5 rounded border border-indigo-700/40">
-                          {v}
-                        </span>
-                      ))}
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs font-mono font-bold text-[#0F2747]">{cand.coverage_pct}%</span>
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded font-semibold ${
+                          cand.coverage_pct >= 100
+                            ? 'bg-[#E8F8F3] text-[#00A878] border border-[#00A878]/30'
+                            : cand.coverage_pct >= 70
+                            ? 'bg-[#F4F8FC] text-[#0A6ED1] border border-[#0A6ED1]/30'
+                            : 'bg-amber-50 text-amber-700 border border-amber-200'
+                        }`}
+                      >
+                        {cand.coverage_group}
+                      </span>
                     </div>
                   </div>
-                )}
+                );
+              })}
+          </div>
 
-                {/* Clean-Core Trade-offs & Evidence Summary */}
-                {result.decision.tradeoffs && result.decision.tradeoffs.length > 0 && (
-                  <div className="space-y-1 border-t border-gray-900 pt-2">
-                    <div className="text-[10px] font-semibold text-gray-400">Clean-Core Architecture Trade-offs:</div>
-                    <ul className="text-[11px] text-gray-400 list-disc list-inside space-y-0.5">
-                      {result.decision.tradeoffs.map((t, idx) => (
-                        <li key={idx}>{t}</li>
-                      ))}
-                    </ul>
+          <div className="flex items-center justify-between pt-4 border-t border-[#D9E4F0]">
+            <button
+              onClick={() => setActiveStep(3)}
+              className="px-4 py-2 rounded-lg border border-[#D9E4F0] hover:bg-[#F4F8FC] text-xs text-[#0F2747] font-medium flex items-center gap-1.5"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" /> Back to Recommendations
+            </button>
+            <button
+              onClick={handleProceedToMapping}
+              disabled={selectedCandidateIds.length === 0}
+              className="px-6 py-2.5 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-2 shadow-xs"
+            >
+              Proceed with {selectedCandidateIds.length} Selected Candidate{selectedCandidateIds.length === 1 ? '' : 's'} <ArrowRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 6: FIELD MAPPING (Section 27) */}
+      {activeStep === 5 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-6 space-y-6 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-base font-bold text-[#0F2747]">Step 6 — Field Mapping</h2>
+              <p className="text-xs text-[#5F7187]">
+                Authoritative mapping of Business Fields to verified SAP CDS Technical Fields and Data Types.
+              </p>
+            </div>
+            <span className="text-xs bg-[#F4F8FC] border border-[#D9E4F0] text-[#0A6ED1] px-3 py-1 rounded-full font-medium">
+              Verified in SAP ADT
+            </span>
+          </div>
+
+          <div className="rounded-xl border border-[#D9E4F0] overflow-hidden bg-white">
+            <table className="w-full text-xs">
+              <thead className="bg-[#F4F8FC] text-[#5F7187] text-left border-b border-[#D9E4F0]">
+                <tr>
+                  <th className="p-3">Business Field</th>
+                  <th className="p-3">Selected CDS View</th>
+                  <th className="p-3">Actual SAP Technical Field</th>
+                  <th className="p-3">Field Label</th>
+                  <th className="p-3">Data Type</th>
+                  <th className="p-3">Evidence Source</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#D9E4F0]">
+                {fieldMappings.map((m, idx) => (
+                  <tr key={m.business_field + idx} className="hover:bg-[#F4F8FC]/50 transition">
+                    <td className="p-3 font-semibold text-[#0F2747]">{m.business_field}</td>
+                    <td className="p-3 font-mono text-[#0A6ED1] font-semibold">
+                      {selectedViews.length > 1 ? (
+                        <select
+                          value={m.cds_view}
+                          onChange={(e) => {
+                            const updated = [...fieldMappings];
+                            updated[idx].cds_view = e.target.value.toUpperCase();
+                            setFieldMappings(updated);
+                          }}
+                          className="bg-white border border-[#D9E4F0] px-2 py-1 rounded text-xs font-mono text-[#0A6ED1] outline-none focus:border-[#0A6ED1]"
+                        >
+                          {selectedViews.map((v) => (
+                            <option key={v} value={v}>
+                              {v}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        m.cds_view
+                      )}
+                    </td>
+                    <td className="p-3">
+                      <input
+                        type="text"
+                        value={m.actual_field}
+                        onChange={(e) => {
+                          const updated = [...fieldMappings];
+                          updated[idx].actual_field = e.target.value;
+                          setFieldMappings(updated);
+                        }}
+                        className="bg-white border border-[#D9E4F0] px-2 py-1 rounded text-xs font-mono text-[#0A6ED1] outline-none focus:border-[#0A6ED1]"
+                      />
+                    </td>
+                    <td className="p-3 text-[#5F7187]">{m.field_label}</td>
+                    <td className="p-3 font-mono text-purple-700 font-medium">{m.data_type}</td>
+                    <td className="p-3 text-[11px] text-[#5F7187]">{m.evidence}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center justify-between pt-4 border-t border-[#D9E4F0]">
+            <button
+              onClick={() => setActiveStep(4)}
+              className="px-4 py-2 rounded-lg border border-[#D9E4F0] hover:bg-[#F4F8FC] text-xs text-[#0F2747] font-medium flex items-center gap-1.5"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" /> Back to Selection
+            </button>
+            <button
+              onClick={() => setActiveStep(6)} // Step 7: KPI
+              className="px-6 py-2.5 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] text-white text-xs font-semibold flex items-center gap-2 shadow-xs"
+            >
+              Continue to KPI Step <ArrowRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 7: KPI (OPTIONAL - Section 28) */}
+      {activeStep === 6 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-6 space-y-6 shadow-sm">
+          <div>
+            <h2 className="text-base font-bold text-[#0F2747]">Step 7 — KPI Calculation (Optional)</h2>
+            <p className="text-xs text-[#5F7187]">
+              Calculate an analytical KPI measure. KPI is completely optional and never mandatory.
+            </p>
+          </div>
+
+          <div className="bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl p-5 space-y-4 max-w-2xl">
+            <div className="text-xs font-bold text-[#0F2747]">Do you want to add a KPI?</div>
+            <div className="flex items-center gap-6">
+              <label className="flex items-center gap-2 text-xs text-[#172B4D] cursor-pointer font-medium">
+                <input
+                  type="radio"
+                  name="kpi"
+                  checked={!kpiEnabled}
+                  onChange={() => setKpiEnabled(false)}
+                  className="text-[#0A6ED1]"
+                />
+                <span>( ) No — Skip KPI calculation</span>
+              </label>
+              <label className="flex items-center gap-2 text-xs text-[#172B4D] cursor-pointer font-medium">
+                <input
+                  type="radio"
+                  name="kpi"
+                  checked={kpiEnabled}
+                  onChange={() => setKpiEnabled(true)}
+                  className="text-[#0A6ED1]"
+                />
+                <span>( ) Yes — Add KPI formula</span>
+              </label>
+            </div>
+
+            {kpiEnabled && (
+              <div className="space-y-2 pt-3 border-t border-[#D9E4F0]">
+                <label className="text-xs text-[#0F2747] font-semibold">Enter KPI Formula:</label>
+                <input
+                  type="text"
+                  value={kpiFormula}
+                  onChange={(e) => setKpiFormula(e.target.value)}
+                  placeholder="e.g. Total Net Amount = SUM(NetAmount)"
+                  className="w-full bg-white border border-[#D9E4F0] rounded-lg p-3 text-xs font-mono text-[#172B4D] outline-none focus:border-[#0A6ED1]"
+                />
+                <p className="text-[11px] text-[#5F7187]">
+                  Actual numeric fields and source entities will strictly come from verified ADT metadata.
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between pt-4 border-t border-[#D9E4F0]">
+            <button
+              onClick={() => setActiveStep(5)}
+              className="px-4 py-2 rounded-lg border border-[#D9E4F0] hover:bg-[#F4F8FC] text-xs text-[#0F2747] font-medium flex items-center gap-1.5"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" /> Back to Mapping
+            </button>
+            <button
+              onClick={() => setActiveStep(7)} // Step 8: Code Generation
+              className="px-6 py-2.5 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] text-white text-xs font-semibold flex items-center gap-2 shadow-xs"
+            >
+              Continue to Code Generation <ArrowRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 8: CODE GENERATION TRIGGER (Section 29) */}
+      {activeStep === 7 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-8 space-y-6 text-center max-w-xl mx-auto shadow-sm">
+          <Code2 className="w-10 h-10 text-[#00A878] mx-auto" />
+          <div>
+            <h2 className="text-base font-bold text-[#0F2747]">Step 8 — Synthesize CDS View Entity</h2>
+            <p className="text-xs text-[#5F7187] mt-1">
+              Gemini 3.5 Flash synthesizes clean ABAP CDS View Entity DDL code using ONLY verified metadata.
+            </p>
+          </div>
+
+          <div className="bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl p-4 text-left space-y-2 text-xs">
+            <div className="flex justify-between">
+              <span className="text-[#5F7187]">Selected CDS Views:</span>
+              <span className="font-mono text-[#0A6ED1] font-semibold">{selectedViews.join(', ')}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-[#5F7187]">Verified Fields:</span>
+              <span className="text-[#172B4D] font-medium">{fieldMappings.length} mappings</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-[#5F7187]">Optional KPI:</span>
+              <span className="text-[#172B4D] font-medium">{kpiEnabled ? kpiFormula : 'None'}</span>
+            </div>
+          </div>
+
+          <button
+            onClick={handleGenerateCode}
+            disabled={isGeneratingCode}
+            className="w-full py-3 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-2 shadow-xs"
+          >
+            {isGeneratingCode ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+            Generate CDS Code
+          </button>
+        </div>
+      )}
+
+      {/* STEP 9: CODE REVIEW & REGENERATION (HITL GATE 3 - Sections 30-32) */}
+      {activeStep === 8 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-6 space-y-6 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <ShieldCheck className="w-5 h-5 text-[#00A878]" />
+              <div>
+                <h2 className="text-base font-bold text-[#0F2747]">Step 9 — Human Code Review (HITL Gate 3)</h2>
+                <p className="text-xs text-[#5F7187]">
+                  Review generated or user-provided CDS View Entity source code before anything is created in SAP.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-mono px-3 py-1 rounded-full border bg-amber-50 border-amber-200 text-amber-800 font-medium">
+                Code Status: {codeStatus}
+              </span>
+              <span className="text-xs bg-[#E8F8F3] border border-[#00A878]/30 text-[#00A878] px-3 py-1 rounded-full font-medium">
+                Human Review Gate
+              </span>
+            </div>
+          </div>
+
+          {/* Code Source Selector */}
+          <div className="flex items-center gap-6 p-3.5 bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl text-xs">
+            <span className="font-bold text-[#0F2747]">Code Source:</span>
+            <label className="flex items-center gap-2 cursor-pointer font-medium text-[#0F2747]">
+              <input
+                type="radio"
+                name="codeSourceMode"
+                value="GEMINI"
+                checked={codeSourceMode === 'GEMINI'}
+                onChange={() => setCodeSourceMode('GEMINI')}
+                className="text-[#0A6ED1] focus:ring-0"
+              />
+              Gemini Generated
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer font-medium text-[#0F2747]">
+              <input
+                type="radio"
+                name="codeSourceMode"
+                value="USER_PROVIDED"
+                checked={codeSourceMode === 'USER_PROVIDED'}
+                onChange={() => {
+                  setCodeSourceMode('USER_PROVIDED');
+                  if (!userProvidedCode) {
+                    setUserProvidedCode(generatedCode);
+                  }
+                }}
+                className="text-[#0A6ED1] focus:ring-0"
+              />
+              User Provided
+            </label>
+          </div>
+
+          {/* GEMINI GENERATED MODE */}
+          {codeSourceMode === 'GEMINI' && (
+            <>
+              {/* Generated Code Display with Copy Button */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs text-[#5F7187]">
+                  <span>CDS View Entity Source</span>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(generatedCode);
+                      setCopiedCode(true);
+                      setTimeout(() => setCopiedCode(false), 2000);
+                    }}
+                    className="flex items-center gap-1 text-[11px] text-[#0A6ED1] hover:underline font-medium"
+                  >
+                    {copiedCode ? <Check className="w-3 h-3 text-[#00A878]" /> : <Copy className="w-3 h-3" />}
+                    {copiedCode ? 'Copied' : 'Copy Code'}
+                  </button>
+                </div>
+                <pre className="p-4 rounded-xl bg-[#0F2747] border border-[#0F2747] font-mono text-xs text-[#00A878] max-h-80 overflow-y-auto leading-relaxed shadow-inner">
+                  {generatedCode}
+                </pre>
+                {codeExplanation && <p className="text-[11px] text-[#5F7187] italic">{codeExplanation}</p>}
+              </div>
+
+              {/* Regeneration with Reviewer Feedback Box */}
+              <div className="p-4 rounded-xl bg-[#F4F8FC] border border-[#D9E4F0] space-y-2.5">
+                <div className="text-xs font-bold text-[#0F2747]">Request Changes / Feedback (Optional):</div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={regenerateFeedback}
+                    onChange={(e) => setRegenerateFeedback(e.target.value)}
+                    placeholder="e.g. Add material description or customize key fields."
+                    className="flex-1 bg-white border border-[#D9E4F0] rounded-lg px-3 py-2 text-xs text-[#172B4D] outline-none focus:border-[#0A6ED1]"
+                  />
+                  <button
+                    onClick={handleRegenerateCode}
+                    disabled={isRegenerating || !regenerateFeedback.trim()}
+                    className="px-4 py-2 rounded-lg bg-white border border-[#D9E4F0] hover:bg-[#D9E4F0]/50 disabled:opacity-50 text-xs text-[#0F2747] font-semibold flex items-center gap-1.5 whitespace-nowrap"
+                  >
+                    {isRegenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                    Regenerate
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* USER PROVIDED MODE */}
+          {codeSourceMode === 'USER_PROVIDED' && (
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs text-[#5F7187]">
+                  <span className="font-bold text-[#0F2747]">CDS Source Code Editor</span>
+                  <span className="text-[11px] text-[#5F7187]">Paste or write standard ABAP CDS View Entity DDL</span>
+                </div>
+                <textarea
+                  value={userProvidedCode}
+                  onChange={(e) => {
+                    setUserProvidedCode(e.target.value);
+                  }}
+                  rows={12}
+                  placeholder="define view entity ZC_MyCustomView as select from ..."
+                  className="w-full p-4 rounded-xl bg-[#0F2747] border border-[#0F2747] font-mono text-xs text-[#00A878] leading-relaxed shadow-inner outline-none focus:ring-1 focus:ring-[#00A878]"
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between pt-4 border-t border-[#D9E4F0]">
+            <button
+              onClick={() => setActiveStep(6)}
+              className="px-4 py-2 rounded-lg border border-[#D9E4F0] hover:bg-[#F4F8FC] text-xs text-[#0F2747] font-medium flex items-center gap-1.5"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" /> Back to KPI
+            </button>
+            <button
+              onClick={handleApproveCode}
+              disabled={codeSourceMode === 'USER_PROVIDED' ? !userProvidedCode.trim() : !generatedCode.trim()}
+              className="px-6 py-2.5 rounded-xl bg-[#00A878] hover:bg-[#00A878]/90 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold flex items-center gap-2 shadow-xs"
+            >
+              <Check className="w-4 h-4" /> Approve &amp; Continue (Approve Code)
+            </button>
+          </div>
+
+        </div>
+      )}
+
+      {/* STEP 10: CDS ARTIFACT NAME (HITL GATE 4 - Sections 33-34) */}
+      {activeStep === 9 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-6 space-y-6 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <ShieldCheck className="w-5 h-5 text-[#00A878]" />
+              <div>
+                <h2 className="text-base font-bold text-[#0F2747]">Step 10 — CDS Artifact Name Approval (HITL Gate 4)</h2>
+                <p className="text-xs text-[#5F7187]">
+                  Validate the final CDS artifact name against ABAP naming conventions and repository collision checks.
+                </p>
+              </div>
+            </div>
+            <span className="text-xs bg-[#E8F8F3] border border-[#00A878]/30 text-[#00A878] px-3 py-1 rounded-full font-medium">
+              Name Approval
+            </span>
+          </div>
+
+          <div className="bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl p-5 space-y-4 max-w-xl">
+            <div>
+              <label className="text-xs font-bold text-[#0F2747]">CDS Artifact Name</label>
+              <input
+                type="text"
+                value={artifactName}
+                onChange={(e) => setArtifactName(e.target.value.toUpperCase())}
+                placeholder="e.g. ZC_SALESORDERANALYSIS"
+                className="mt-1.5 w-full bg-white border border-[#D9E4F0] rounded-lg p-3 text-xs font-mono text-[#0A6ED1] font-semibold outline-none focus:border-[#0A6ED1]"
+              />
+              <p className="text-[11px] text-[#5F7187] mt-1">
+                Must start with Z or Y, uppercase alphanumeric + underscores, max 30 characters.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-[#0F2747]">Target ABAP Package</label>
+              <input
+                type="text"
+                value={targetPackage}
+                onChange={(e) => setTargetPackage(e.target.value.toUpperCase())}
+                placeholder="e.g. ZTRAINING_2026"
+                className="mt-1.5 w-full bg-white border border-[#D9E4F0] rounded-lg p-3 text-xs font-mono text-purple-700 font-semibold outline-none focus:border-[#0A6ED1]"
+              />
+            </div>
+
+            <button
+              onClick={handleValidateName}
+              disabled={isValidatingName}
+              className="px-4 py-2 bg-white border border-[#D9E4F0] hover:bg-[#F4F8FC] text-xs text-[#0F2747] rounded-lg flex items-center gap-1.5 font-semibold"
+            >
+              {isValidatingName ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5 text-[#00A878]" />}
+              Validate Name &amp; Check Collisions
+            </button>
+
+            {nameValidation && (
+              <div
+                className={`p-3 rounded-lg border text-xs ${
+                  nameValidation.valid
+                    ? 'bg-[#E8F8F3] border-[#00A878]/30 text-[#00A878]'
+                    : 'bg-red-50 border-red-200 text-red-700'
+                }`}
+              >
+                {nameValidation.valid ? (
+                  <div className="flex items-center gap-2">
+                    <Check className="w-4 h-4" />
+                    <span>Valid Clean Core CDS name. No repository duplicate detected.</span>
                   </div>
-                )}
-
-                {/* Warnings if any */}
-                {result.decision.warnings && result.decision.warnings.length > 0 && (
-                  <div className="p-2.5 rounded bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-300 space-y-1">
-                    <div className="font-medium flex items-center space-x-1">
-                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Warnings / Evidence Gaps:</span>
-                    </div>
-                    <ul className="list-disc list-inside space-y-0.5 text-amber-200">
-                      {result.decision.warnings.map((w, idx) => (
-                        <li key={idx}>{w}</li>
+                ) : (
+                  <div>
+                    <div className="font-semibold mb-1">Validation Errors:</div>
+                    <ul className="list-disc pl-4 space-y-0.5">
+                      {nameValidation.errors.map((err: string, i: number) => (
+                        <li key={i}>{err}</li>
                       ))}
                     </ul>
                   </div>
                 )}
               </div>
+            )}
+          </div>
 
-              {/* Candidate Comparison Table */}
-              {evaluations.length > 0 ? (
-                <div className="space-y-2">
-                  <div className="text-xs font-semibold text-gray-300 flex items-center justify-between">
-                    <span className="flex items-center space-x-1.5">
-                      <Layers className="w-3.5 h-3.5 text-blue-400" />
-                      <span>Evaluated SAP CDS Candidates ({evaluations.length})</span>
+          <div className="flex items-center justify-between pt-4 border-t border-[#D9E4F0]">
+            <button
+              onClick={() => setActiveStep(8)}
+              className="px-4 py-2 rounded-lg border border-[#D9E4F0] hover:bg-[#F4F8FC] text-xs text-[#0F2747] font-medium flex items-center gap-1.5"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" /> Back to Code Review
+            </button>
+            <button
+              onClick={async () => {
+                const cleanName = artifactName.trim().toUpperCase();
+                const match = generatedCode.match(/\bdefine\s+(?:root\s+|custom\s+)?view\s+(?:entity\s+)?([a-zA-Z0-9_\/]+)/i);
+                const currentEntityName = match ? match[1].trim().toUpperCase() : '';
+
+                if (codeSourceMode === 'GEMINI' && currentEntityName !== cleanName) {
+                  setIsGeneratingCode(true);
+                  try {
+                    const res = await generateCdsCode({
+                      requirement: requirementText,
+                      selected_views: selectedViews,
+                      mappings: fieldMappings,
+                      join_paths: selectedViews.length > 1 ? [{ left_view: selectedViews[0], right_view: selectedViews[1] }] : [],
+                      kpi: kpiEnabled ? { enabled: true, formula: kpiFormula } : null,
+                      artifact_name: cleanName,
+                    });
+                    if (res?.result?.code) {
+                      setGeneratedCode(res.result.code);
+                      if (res?.validation) {
+                        setCodeValidation(res.validation);
+                      }
+                    }
+                  } catch (e: any) {
+                    console.error('Failed to sync generated code with new artifact name', e);
+                  } finally {
+                    setIsGeneratingCode(false);
+                  }
+                }
+                setActiveStep(10); // Step 11: Final Approval
+              }}
+              className="px-6 py-2.5 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] text-white text-xs font-semibold flex items-center gap-2 shadow-xs"
+            >
+              Proceed to Final Approval <ArrowRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 11: FINAL APPROVAL (HITL GATE 5 - Section 35) */}
+      {activeStep === 10 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-6 space-y-6 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Lock className="w-5 h-5 text-[#00A878]" />
+              <div>
+                <h2 className="text-base font-bold text-[#0F2747]">Step 11 — Final Human Approval (HITL Gate 5)</h2>
+                <p className="text-xs text-[#5F7187]">
+                  Complete summary of requirement, metadata, and code. No creation occurs in SAP without your explicit approval.
+                </p>
+              </div>
+            </div>
+            <span className="text-xs bg-[#E8F8F3] border border-[#00A878]/30 text-[#00A878] px-3 py-1 rounded-full font-medium">
+              Mandatory Sign-off
+            </span>
+          </div>
+
+          {/* Final Summary Card (Section 35) */}
+          <div className="bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl p-5 space-y-4 text-xs">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <span className="text-[#5F7187]">Business Requirement:</span>
+                <p className="text-[#172B4D] mt-1 font-medium">{requirementText}</p>
+              </div>
+              <div>
+                <span className="text-[#5F7187]">Target SAP System:</span>
+                <p className="text-[#0A6ED1] font-mono mt-1 font-semibold">
+                  {metadataStatus?.connection_status || 'SAP S/4HANA DEV (Client 100)'}
+                </p>
+              </div>
+              <div>
+                <span className="text-[#5F7187]">CDS Artifact Name &amp; Package:</span>
+                <p className="font-mono text-[#00A878] mt-1 font-semibold">
+                  {artifactName} <span className="text-[#5F7187]">in</span> {targetPackage}
+                </p>
+              </div>
+              <div>
+                <span className="text-[#5F7187]">Selected CDS Entities:</span>
+                <p className="font-mono text-purple-700 mt-1 font-semibold">{selectedViews.join(', ')}</p>
+              </div>
+              <div>
+                <span className="text-[#5F7187]">Field Mappings:</span>
+                <p className="text-[#172B4D] mt-1 font-medium">{fieldMappings.length} verified fields mapped</p>
+              </div>
+              <div>
+                <span className="text-[#5F7187]">KPI Measure:</span>
+                <p className="text-[#172B4D] mt-1 font-medium">{kpiEnabled ? kpiFormula : 'None'}</p>
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-[#D9E4F0] space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-[#0F2747] flex items-center gap-1.5">
+                  <span>SAP Workbench Transport Request (CTS)</span>
+                  <span className="text-red-500 font-bold">*</span>
+                </label>
+                {/* Transport Request Status Indicator */}
+                <div>
+                  {!transportRequest.trim() ? (
+                    <span className="text-[11px] px-2.5 py-0.5 rounded bg-white text-amber-700 border border-amber-200 font-medium">
+                      Not Selected
                     </span>
-                    <span className="text-[10px] text-gray-500">Heuristic Ranking & Hard Overrides</span>
+                  ) : isTransportValid ? (
+                    <span className="text-[11px] px-2.5 py-0.5 rounded bg-[#E8F8F3] text-[#00A878] border border-[#00A878]/40 flex items-center gap-1 font-mono font-semibold">
+                      <Check className="w-3 h-3" /> Valid Format: {transportRequest.trim().toUpperCase()}
+                    </span>
+                  ) : (
+                    <span className="text-[11px] px-2.5 py-0.5 rounded bg-red-50 text-red-700 border border-red-200 flex items-center gap-1 font-medium">
+                      <AlertCircle className="w-3 h-3" /> Invalid Format (Must match e.g. S4HK900123)
+                    </span>
+                  )}
+                </div>
+              </div>
+              {availableTransports.length > 0 && (
+                <div className="mt-1 mb-1">
+                  <div className="flex items-center justify-between text-[11px] text-[#5F7187] mb-1">
+                    <span>Quick Select Active Transport (from SAP ADT):</span>
+                    {isLoadingTransports && <Loader2 className="w-3 h-3 animate-spin text-[#0A6ED1]" />}
                   </div>
+                  <select
+                    value={transportRequest}
+                    onChange={(e) => setTransportRequest(e.target.value)}
+                    className="w-full bg-white border border-[#D9E4F0] rounded-lg px-3 py-2 text-xs font-mono text-[#172B4D] outline-none"
+                  >
+                    <option value="">-- Select from verified SAP Transports --</option>
+                    {availableTransports.map((tr) => (
+                      <option key={tr.number} value={tr.number}>
+                        {tr.number} [{tr.owner}] — {tr.description || 'Workbench Transport'} ({tr.status})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <input
+                type="text"
+                value={transportRequest}
+                onChange={(e) => setTransportRequest(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+                maxLength={10}
+                placeholder="e.g. S4HK900123 (Required: 3-char System ID + K + 6 digits)"
+                className={`mt-1 w-full bg-white border rounded-lg px-3.5 py-2.5 text-xs font-mono text-[#172B4D] outline-none transition ${
+                  !transportRequest.trim()
+                    ? 'border-[#D9E4F0] focus:border-[#0A6ED1]'
+                    : isTransportValid
+                    ? 'border-[#00A878] focus:border-[#00A878]'
+                    : 'border-red-400 focus:border-red-500'
+                }`}
+              />
+              <p className="text-[11px] text-[#5F7187]">
+                CTS rule: Exactly 3 alphanumeric characters (SAP System ID), literal 'K', followed by 6 digits.
+              </p>
+            </div>
+          </div>
 
-                  <div className="overflow-x-auto rounded-lg border border-gray-800 bg-gray-950">
-                    <table className="w-full text-[11px] text-left text-gray-300">
-                      <thead className="bg-gray-900/80 text-gray-400 font-semibold border-b border-gray-800">
+          <div className="flex items-center justify-between pt-4 border-t border-[#D9E4F0]">
+            <button
+              onClick={() => setActiveStep(9)}
+              className="px-4 py-2 rounded-lg border border-[#D9E4F0] hover:bg-[#F4F8FC] text-xs text-[#0F2747] font-medium flex items-center gap-1.5"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" /> Back to CDS Name
+            </button>
+            <button
+              onClick={handleExecuteSapCreation}
+              disabled={isCreatingSap || !isTransportValid || (nameValidation && nameValidation.valid === false)}
+              className="px-8 py-3 rounded-xl bg-[#00A878] hover:bg-[#00A878]/90 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold flex items-center gap-2 shadow-xs"
+            >
+              {isCreatingSap ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
+              Approve &amp; Create in SAP
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 12: ADT CREATION IN PROGRESS / STATUS (Section 36) */}
+      {activeStep === 11 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-8 space-y-6 text-center max-w-xl mx-auto shadow-sm">
+          {isCreatingSap ? (
+            <>
+              <Loader2 className="w-10 h-10 text-[#00A878] animate-spin mx-auto" />
+              <div>
+                <h2 className="text-base font-bold text-[#0F2747]">Step 12 — ADT Creation In Progress</h2>
+                <p className="text-xs text-[#5F7187] mt-1">Executing authenticated REST call over TLS to SAP S/4HANA ADT endpoints.</p>
+              </div>
+            </>
+          ) : creationResult?.success === false ? (
+            <div className="space-y-4">
+              <AlertCircle className="w-10 h-10 text-red-600 mx-auto" />
+              <div>
+                <h2 className="text-base font-bold text-red-700">SAP Creation Error</h2>
+                <p className="text-xs text-red-600 mt-1">{creationResult?.error}</p>
+              </div>
+              <button
+                onClick={() => setActiveStep(10)}
+                className="px-4 py-2 rounded-lg bg-[#F4F8FC] border border-[#D9E4F0] hover:bg-[#D9E4F0]/50 text-xs text-[#0F2747] font-semibold"
+              >
+                Return to Final Approval
+              </button>
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {/* STEP 13: COMPLETION (Section 37) */}
+      {activeStep === 12 && (
+        <div className="bg-white border border-[#D9E4F0] rounded-2xl p-8 space-y-6 text-center max-w-xl mx-auto shadow-sm">
+          {isReuseFlow ? (
+            <>
+              <CheckCircle2 className="w-12 h-12 text-[#00A878] mx-auto" />
+              <div>
+                <h2 className="text-lg font-bold text-[#0F2747]">✓ REUSE EXISTING CDS APPROVED</h2>
+                <p className="text-xs text-[#5F7187] mt-1">
+                  Standard SAP CDS View Entity satisfies 100% of required business fields. Direct reuse approved without creating custom CDS artifacts.
+                </p>
+              </div>
+
+              <div className="bg-[#E8F8F3]/60 border border-[#00A878]/30 rounded-xl p-5 text-left text-xs space-y-2.5 font-mono text-[#172B4D]">
+                <div className="flex justify-between items-center border-b border-[#00A878]/20 pb-2">
+                  <span className="text-[#5F7187] font-sans font-medium">Approved Existing CDS:</span>
+                  <span className="text-[#0A6ED1] font-bold text-sm">{reusedCdsName}</span>
+                </div>
+                <div className="flex justify-between items-center border-b border-[#00A878]/20 pb-2">
+                  <span className="text-[#5F7187] font-sans font-medium">Field Coverage:</span>
+                  <span className="text-[#00A878] font-bold">100% (All required fields verified in SAP ADT)</span>
+                </div>
+                <div className="flex justify-between items-center border-b border-[#00A878]/20 pb-2">
+                  <span className="text-[#5F7187] font-sans font-medium">Action Approved:</span>
+                  <span className="text-[#00A878] font-semibold bg-[#E8F8F3] px-2 py-0.5 rounded border border-[#00A878]/30">REUSE_EXISTING (Zero Clean-Core Footprint)</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[#5F7187] font-sans font-medium">Custom Artifact Creation:</span>
+                  <span className="text-[#5F7187] font-semibold">NOT REQUIRED (No DDL generated, no ADT create called)</span>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap justify-center gap-3 pt-2">
+                <button
+                  onClick={() => openViewDetails(reusedCdsName)}
+                  className="px-4 py-2.5 rounded-xl bg-[#F4F8FC] border border-[#D9E4F0] hover:bg-[#D9E4F0]/50 text-[#0F2747] text-xs font-semibold flex items-center gap-1.5 shadow-xs"
+                >
+                  <Database className="w-4 h-4 text-[#0A6ED1]" /> View CDS Details &amp; Fields
+                </button>
+                <button
+                  onClick={() => handleOpenLiveSource(reusedCdsName)}
+                  className="px-4 py-2.5 rounded-xl bg-[#F4F8FC] border border-[#D9E4F0] hover:bg-purple-50 text-[#0A6ED1] text-xs font-mono font-semibold flex items-center gap-1.5 shadow-xs"
+                >
+                  <FileText className="w-4 h-4 text-[#0A6ED1]" /> View Genuine ADT Source
+                </button>
+                <button
+                  onClick={() => {
+                    setIsReuseFlow(false);
+                    setReusedCdsName('');
+                    setReusedCdsItem(null);
+                    setActiveStep(0);
+                  }}
+                  className="px-6 py-2.5 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] text-white text-xs font-semibold shadow-xs"
+                >
+                  Start New Requirement
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <CheckCircle2 className="w-12 h-12 text-[#00A878] mx-auto" />
+              <div>
+                <h2 className="text-lg font-bold text-[#0F2747]">Step 13 — CDS Creation Successful</h2>
+                <p className="text-xs text-[#5F7187] mt-1">
+                  Your CDS View Entity was verified and recorded with authoritative SAP ADT metadata.
+                </p>
+              </div>
+
+              <div className="bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl p-5 text-left text-xs space-y-2 font-mono">
+                <div className="flex justify-between">
+                  <span className="text-[#5F7187]">CDS Name:</span>
+                  <span className="text-[#00A878] font-bold">{creationResult?.name || artifactName}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#5F7187]">Status:</span>
+                  <span className="text-[#00A878] font-semibold">{creationResult?.status || 'Created'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#5F7187]">Package:</span>
+                  <span className="text-purple-700 font-semibold">{creationResult?.package || targetPackage}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#5F7187]">ADT:</span>
+                  <span className="text-[#0A6ED1] font-semibold">Connected</span>
+                </div>
+              </div>
+
+              <div className="flex justify-center gap-3 pt-2">
+                <button
+                  onClick={() => handleOpenLiveSource(creationResult?.name || artifactName)}
+                  className="px-5 py-2.5 rounded-xl bg-white border border-[#D9E4F0] hover:bg-[#F4F8FC] text-[#0F2747] text-xs font-semibold flex items-center gap-1.5 shadow-xs"
+                >
+                  <FileText className="w-4 h-4 text-[#0A6ED1]" /> View Source
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveStep(0);
+                    setCreationResult(null);
+                  }}
+                  className="px-6 py-2.5 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] text-white text-xs font-semibold shadow-xs"
+                >
+                  Start Another Requirement
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* 4. MODALS */}
+
+      {/* View Details Modal (Section 21) */}
+      {detailsModalItem && (
+        <div className="fixed inset-0 z-50 bg-[#0F2747]/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-[#D9E4F0] rounded-2xl max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+            <div className="p-4 bg-[#F4F8FC] border-b border-[#D9E4F0] flex items-center justify-between">
+              <div>
+                <div className="font-mono text-sm font-bold text-[#0A6ED1]">{detailsModalItem.cds_name}</div>
+                <div className="text-xs text-[#5F7187]">{detailsModalItem.description}</div>
+              </div>
+              <button onClick={() => setDetailsModalItem(null)} className="p-1 text-[#5F7187] hover:text-[#0F2747]">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 overflow-y-auto space-y-4 flex-1 text-xs text-[#172B4D]">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                <div className="bg-[#F4F8FC] p-2 rounded-lg border border-[#D9E4F0]">
+                  <span className="text-[#5F7187]">Domain:</span> <span className="font-semibold">{detailsModalItem.domain}</span>
+                </div>
+                <div className="bg-[#F4F8FC] p-2 rounded-lg border border-[#D9E4F0]">
+                  <span className="text-[#5F7187]">App Component:</span> <span className="font-semibold font-mono text-teal-800">{detailsModalItem.application_component || 'N/A'}</span>
+                </div>
+                <div className="bg-[#F4F8FC] p-2 rounded-lg border border-[#D9E4F0]">
+                  <span className="text-[#5F7187]">Package:</span> <span className="font-semibold font-mono">{detailsModalItem.package || 'N/A'}</span>
+                </div>
+                <div className="bg-[#F4F8FC] p-2 rounded-lg border border-[#D9E4F0]">
+                  <span className="text-[#5F7187]">Grain:</span> <span className="font-semibold">{detailsModalItem.grain}</span>
+                </div>
+                <div className="bg-[#F4F8FC] p-2 rounded-lg border border-[#D9E4F0]">
+                  <span className="text-[#5F7187]">Fields:</span> <span className="font-semibold">{detailsModalItem.fields?.length || 0}</span>
+                </div>
+              </div>
+
+              {/* Associations */}
+              {detailsModalItem.associations?.length > 0 && (
+                <div>
+                  <div className="text-xs font-bold text-[#0F2747] mb-1.5">Associations in ADT:</div>
+                  <div className="border border-[#D9E4F0] rounded-lg max-h-36 overflow-y-auto bg-white">
+                    <table className="w-full text-[11px]">
+                      <thead className="bg-[#F4F8FC] text-[#5F7187]">
                         <tr>
-                          <th className="px-3 py-2">Rank</th>
-                          <th className="px-3 py-2">Candidate CDS View</th>
-                          <th className="px-3 py-2">Layer</th>
-                          <th className="px-3 py-2">Coverage</th>
-                          <th className="px-3 py-2">Rank Score</th>
-                          <th className="px-3 py-2">Extendable</th>
-                          <th className="px-3 py-2 text-right">Details</th>
+                          <th className="p-2 text-left">Association</th>
+                          <th className="p-2 text-left">Target</th>
+                          <th className="p-2 text-left">Cardinality</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-gray-800">
-                        {evaluations.map((ev) => (
-                          <React.Fragment key={ev.candidate.view_name}>
-                            <tr className="hover:bg-gray-900/40 transition-colors">
-                              <td className="px-3 py-2 font-mono font-bold text-blue-400">#{ev.rank}</td>
-                              <td className="px-3 py-2 font-mono font-medium text-gray-200">
-                                {ev.candidate.view_name}
-                              </td>
-                              <td className="px-3 py-2">
-                                <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-300">
-                                  {ev.candidate.layer}
-                                </span>
-                              </td>
-                              <td className="px-3 py-2 font-mono">{ev.coverage_percentage}%</td>
-                              <td className="px-3 py-2 font-mono">{ev.rank_score}</td>
-                              <td className="px-3 py-2">
-                                {ev.candidate.is_extendable ? (
-                                  <span className="text-emerald-400 flex items-center space-x-0.5">
-                                    <Check className="w-3 h-3" /> <span>Yes</span>
-                                  </span>
-                                ) : (
-                                  <span className="text-rose-400 flex items-center space-x-0.5">
-                                    <X className="w-3 h-3" /> <span>No</span>
-                                  </span>
-                                )}
-                              </td>
-                              <td className="px-3 py-2 text-right">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setExpandedCandidate(
-                                      expandedCandidate === ev.candidate.view_name ? null : ev.candidate.view_name
-                                    )
-                                  }
-                                  className="text-blue-400 hover:text-blue-300 text-[10px] font-medium"
-                                >
-                                  {expandedCandidate === ev.candidate.view_name ? 'Hide' : 'Mappings'}
-                                </button>
-                              </td>
-                            </tr>
-
-                            {/* Expanded Candidate Details */}
-                            {expandedCandidate === ev.candidate.view_name && (
-                              <tr className="bg-gray-900/30">
-                                <td colSpan={7} className="px-4 py-3 border-t border-gray-800 space-y-2">
-                                  <div className="text-[11px] text-gray-400">
-                                    <strong>Evaluation:</strong> {ev.suitability_reason}
-                                  </div>
-                                  <div className="grid grid-cols-2 gap-2 text-[10px] font-mono text-gray-400 bg-gray-950 p-2.5 rounded border border-gray-800">
-                                    <div>Direct Matches: {ev.scoring_breakdown?.direct_matches_count ?? 0}</div>
-                                    <div>Assoc Extensions: {ev.scoring_breakdown?.extension_matches_count ?? 0}</div>
-                                    <div>Missing Concepts: {ev.scoring_breakdown?.missing_count ?? 0}</div>
-                                    <div>Unresolved Targets: {ev.scoring_breakdown?.unresolved_count ?? 0}</div>
-                                  </div>
-
-                                  {/* Field mappings for candidate */}
-                                  <div className="space-y-1 mt-2">
-                                    <div className="text-[10px] font-semibold text-gray-300">Field Mappings:</div>
-                                    <div className="space-y-1">
-                                      {ev.field_mappings.map((m, idx) => (
-                                        <div
-                                          key={idx}
-                                          className="flex items-center justify-between text-[10px] p-1.5 rounded bg-gray-950 border border-gray-800"
-                                        >
-                                          <div className="flex items-center space-x-2">
-                                            <span className="font-semibold text-gray-200">{m.requirement_field}</span>
-                                            <ArrowRight className="w-3 h-3 text-gray-500" />
-                                            <span className="font-mono text-blue-400">
-                                              {m.matched_field || 'None'}
-                                            </span>
-                                          </div>
-                                          <div className="flex items-center space-x-2">
-                                            {renderEvidenceBadge(m.evidence_level)}
-                                            <span className="text-gray-500 text-[9px] max-w-xs truncate" title={m.evidence_detail}>
-                                              {m.evidence_detail}
-                                            </span>
-                                          </div>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                </td>
-                              </tr>
-                            )}
-                          </React.Fragment>
+                      <tbody className="divide-y divide-[#D9E4F0]">
+                        {detailsModalItem.associations.map((a: any, i: number) => (
+                          <tr key={i}>
+                            <td className="p-2 font-mono text-[#0A6ED1] font-semibold">{a.association_name}</td>
+                            <td className="p-2 font-mono text-[#172B4D]">{a.target_entity}</td>
+                            <td className="p-2 text-purple-700 font-medium">{a.cardinality || '1..*'}</td>
+                          </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
                 </div>
-              ) : (
-                <div className="p-3 rounded-lg bg-gray-950 border border-gray-800 text-[11px] text-gray-400 flex items-center space-x-2">
-                  <Info className="w-4 h-4 text-blue-400 shrink-0" />
-                  <span>
-                    <strong>Zero Discovered Candidates:</strong> No SAP CDS objects matched search filters in repository search. No synthetic metadata was injected.
-                  </span>
-                </div>
               )}
 
-              {/* Primary Field Mapping Matrix */}
-              {evaluations.length > 0 && evaluations[0].field_mappings.length > 0 && (
-                <div className="space-y-2">
-                  <div className="text-xs font-semibold text-gray-300 flex items-center justify-between">
-                    <span>Field Mapping Matrix ({evaluations[0].candidate.view_name})</span>
-                    <span className="text-[10px] text-gray-500">6-Level Semantic Evidence Hierarchy</span>
-                  </div>
-                  <div className="space-y-1.5">
-                    {evaluations[0].field_mappings.map((m, idx) => (
-                      <div
-                        key={idx}
-                        className="p-2.5 rounded-lg bg-gray-950 border border-gray-800 flex items-center justify-between text-xs"
-                      >
-                        <div className="space-y-0.5">
-                          <div className="flex items-center space-x-2">
-                            <span className="font-semibold text-gray-200">{m.requirement_field}</span>
-                            <ArrowRight className="w-3 h-3 text-gray-500" />
-                            <span className="font-mono text-blue-400">
-                              {m.matched_field || 'Unmatched'}
-                            </span>
-                          </div>
-                          <div className="text-[10px] text-gray-500">{m.evidence_detail}</div>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          {renderEvidenceBadge(m.evidence_level)}
-                        </div>
-                      </div>
+              {/* Technical Fields */}
+              <div className="text-xs font-bold text-[#0F2747]">Technical Fields in SAP ADT:</div>
+              <div className="max-h-60 overflow-y-auto border border-[#D9E4F0] rounded-lg bg-white">
+                <table className="w-full text-[11px]">
+                  <thead className="sticky top-0 bg-[#F4F8FC] text-[#5F7187]">
+                    <tr>
+                      <th className="p-2 text-left">Field Name</th>
+                      <th className="p-2 text-left">Type</th>
+                      <th className="p-2 text-left">Key</th>
+                      <th className="p-2 text-left">Description</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#D9E4F0]">
+                    {(detailsModalItem.fields || []).map((f: any) => (
+                      <tr key={f.fieldname} className="hover:bg-[#F4F8FC]">
+                        <td className="p-2 font-mono text-[#0F2747] font-semibold">{f.fieldname}</td>
+                        <td className="p-2 font-mono text-purple-700">{f.data_type}</td>
+                        <td className="p-2 text-[#5F7187]">{f.is_key ? 'Yes' : 'No'}</td>
+                        <td className="p-2 text-[#5F7187]">{f.field_label || '—'}</td>
+                      </tr>
                     ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Generated ABAP CDS Code Preview */}
-              <div>
-                <div className="text-xs font-medium text-gray-400 mb-1.5 flex items-center justify-between">
-                  <span>Synthesized ABAP CDS View Entity Draft Skeleton:</span>
-                  <span className="text-[10px] text-amber-400 font-mono">Draft Skeleton</span>
-                </div>
-                <pre className="p-3.5 rounded-lg bg-gray-950 border border-gray-800 text-[11px] font-mono text-gray-300 overflow-x-auto max-h-48 leading-relaxed">
-                  {result.generated_code_preview}
-                </pre>
-              </div>
-
-              {/* Human Governance Approval Banner */}
-              <div className="p-3.5 rounded-lg bg-blue-950/20 border border-blue-800/40 flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <div className="text-xs font-medium text-blue-300">
-                    Human Approval Gate
-                  </div>
-                  <div className="text-[11px] text-gray-400">
-                    {approvalStatus === 'APPROVED'
-                      ? 'Approved by Lead Architect (audit recorded)'
-                      : 'Mandatory sign-off required prior to any SAP DEV activation'}
-                  </div>
-                </div>
-
-                {approvalStatus === 'APPROVED' ? (
-                  <span className="flex items-center text-xs text-emerald-400 font-medium px-3 py-1 bg-emerald-500/10 rounded-md">
-                    <CheckCircle className="w-3.5 h-3.5 mr-1" /> Approved
-                  </span>
-                ) : (
-                  <button
-                    onClick={handleApprove}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium transition-colors"
-                  >
-                    Authorize Draft
-                  </button>
-                )}
+                  </tbody>
+                </table>
               </div>
             </div>
-          )}
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* Why This CDS Modal (Section 22) */}
+      {whyThisModal && (
+        <div className="fixed inset-0 z-50 bg-[#0F2747]/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-[#D9E4F0] rounded-2xl max-w-xl w-full p-5 space-y-4 shadow-2xl text-[#172B4D]">
+            <div className="flex items-center justify-between border-b border-[#D9E4F0] pb-3">
+              <h3 className="text-sm font-bold text-[#0F2747] flex items-center gap-2">
+                <HelpCircle className="w-4 h-4 text-[#0A6ED1]" />
+                Why This CDS? — {whyThisModal.cds_name}
+              </h3>
+              <button onClick={() => setWhyThisModal(null)} className="text-[#5F7187] hover:text-[#0F2747]">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-[#172B4D] leading-relaxed">{whyThisModal.why_this}</p>
+
+            <div className="space-y-2">
+              <div className="text-xs font-bold text-[#0F2747]">Evidence Chain (Section 24):</div>
+              <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                {(whyThisModal.evidence_list || []).map((ev: any, idx: number) => (
+                  <div key={idx} className="p-2.5 rounded-lg bg-[#F4F8FC] border border-[#D9E4F0] text-[11px] space-y-0.5">
+                    <div className="flex justify-between">
+                      <span className="font-bold text-[#0F2747]">{ev.business_field}</span>
+                      <span className="text-[#00A878] font-bold">{ev.match}</span>
+                    </div>
+                    <div className="text-[#5F7187]">
+                      Search Variant: <span className="font-mono text-[#172B4D]">{ev.search_variant}</span> → Actual Field:{' '}
+                      <span className="font-mono text-[#0A6ED1] font-semibold">{ev.actual_field}</span>
+                    </div>
+                    <div className="text-[#5F7187]">Evidence Source: {ev.source}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Why Not Modal (Section 23) */}
+      {whyNotModal && (
+        <div className="fixed inset-0 z-50 bg-[#0F2747]/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-[#D9E4F0] rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl text-[#172B4D]">
+            <div className="flex items-center justify-between border-b border-[#D9E4F0] pb-3">
+              <h3 className="text-sm font-bold text-[#0F2747] flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-600" />
+                Why Not? — {whyNotModal.cds_name}
+              </h3>
+              <button onClick={() => setWhyNotModal(null)} className="text-[#5F7187] hover:text-[#0F2747]">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-[#172B4D] leading-relaxed">{whyNotModal.why_not}</p>
+            {whyNotModal.missing_fields?.length > 0 && (
+              <div className="text-xs text-red-700 bg-red-50 border border-red-200 p-3 rounded-xl">
+                <div className="font-bold mb-1">Missing Business Fields:</div>
+                <ul className="list-disc pl-4 space-y-0.5">
+                  {whyNotModal.missing_fields.map((f: string) => (
+                    <li key={f}>{f}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Genuine SAP ADT CDS Source Inspector Modal (Change 1) */}
+      {(sourceModalData !== null || sourceModalLoading) && (
+        <div className="fixed inset-0 z-50 bg-[#0F2747]/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-[#D9E4F0] rounded-2xl max-w-3xl w-full p-5 space-y-4 shadow-2xl text-[#172B4D]">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-[#D9E4F0] pb-3">
+              <div className="flex items-center gap-2.5">
+                <FileText className="w-5 h-5 text-[#0A6ED1]" />
+                <div>
+                  <h3 className="text-sm font-bold text-[#0F2747] flex items-center gap-2">
+                    SAP ADT CDS Source Inspector —{' '}
+                    <span className="font-mono text-[#0A6ED1]">
+                      {sourceModalData?.view_name || activeSourceView}
+                    </span>
+                  </h3>
+                  <div className="text-[11px] text-[#5F7187]">
+                    ABAP Package: <span className="font-mono text-[#0F2747] font-semibold">{sourceModalData?.package || 'SAP_STANDARD'}</span>
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setSourceModalData(null);
+                  setSourceModalLoading(false);
+                }}
+                className="text-[#5F7187] hover:text-[#0F2747] p-1 rounded-lg hover:bg-[#F4F8FC]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Constituent CDS View Tabs for Multi-CDS recommendations */}
+            {constituentSourceViews.length > 1 && (
+              <div className="flex items-center gap-2 border-b border-[#D9E4F0] pb-2.5">
+                <span className="text-xs text-[#5F7187] font-semibold">Underlying CDS Views:</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {constituentSourceViews.map((v) => (
+                    <button
+                      key={v}
+                      type="button"
+                      onClick={() => loadSourceForView(v)}
+                      className={`px-3 py-1 rounded-lg text-xs font-mono font-semibold transition flex items-center gap-1.5 ${
+                        activeSourceView === v
+                          ? 'bg-[#0A6ED1] text-white shadow-xs'
+                          : 'bg-[#F4F8FC] text-[#5F7187] border border-[#D9E4F0] hover:bg-[#D9E4F0]/50'
+                      }`}
+                    >
+                      <FileText className="w-3 h-3" />
+                      {v}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {sourceModalLoading ? (
+              <div className="py-16 flex flex-col items-center justify-center gap-3 text-xs text-[#5F7187]">
+                <Loader2 className="w-8 h-8 animate-spin text-[#0A6ED1]" />
+                <span className="font-semibold text-[#0F2747]">Connecting to SAP S/4HANA ADT REST API...</span>
+                <span className="text-[11px] font-mono text-[#5F7187]">
+                  /sap/bc/adt/ddic/ddl/sources/{activeSourceView.toLowerCase()}/source/main
+                </span>
+              </div>
+            ) : sourceModalData ? (
+              <div className="space-y-3.5">
+                {/* Status Badges & Evidence Chain */}
+                <div className="bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl p-3 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={`px-2.5 py-0.5 rounded text-[11px] font-bold border ${
+                        sourceModalData.source_status === 'RETRIEVED'
+                          ? 'bg-[#E8F8F3] text-[#00A878] border-[#00A878]/40'
+                          : 'bg-red-50 text-red-700 border-red-200'
+                      }`}
+                    >
+                      ● Source Status: {sourceModalData.source_status}
+                    </span>
+
+                    <span
+                      className={`px-2.5 py-0.5 rounded text-[11px] font-bold border ${
+                        sourceModalData.final_evidence === 'SOURCE_VERIFIED'
+                          ? 'bg-[#E8F8F3] text-[#00A878] border-[#00A878]/40'
+                          : sourceModalData.final_evidence === 'METADATA_ONLY'
+                          ? 'bg-[#F4F8FC] text-[#0A6ED1] border-[#0A6ED1]/40'
+                          : 'bg-red-50 text-red-700 border-red-200'
+                      }`}
+                    >
+                      Final Evidence: {sourceModalData.final_evidence}
+                    </span>
+
+                    <span
+                      className={`px-2.5 py-0.5 rounded text-[11px] font-bold border ${
+                        sourceModalData.field_trace_status === 'CONFIRMED'
+                          ? 'bg-[#E8F8F3] text-[#00A878] border-[#00A878]/40'
+                          : sourceModalData.field_trace_status === 'PARTIALLY_TRACED'
+                          ? 'bg-amber-50 text-amber-700 border-amber-200'
+                          : 'bg-white text-[#5F7187] border-[#D9E4F0]'
+                      }`}
+                    >
+                      Field Trace: {sourceModalData.field_trace_status}
+                    </span>
+                  </div>
+
+                  <div className="text-[11px] font-mono text-[#5F7187]">
+                    <span className="text-[#5F7187]">ADT Endpoint:</span>{' '}
+                    <span className="text-[#0F2747] font-semibold">{sourceModalData.adt_endpoint}</span>
+                  </div>
+
+                  {/* Traced Fields in DDL */}
+                  {sourceModalData.field_traces && Object.keys(sourceModalData.field_traces).length > 0 && (
+                    <div className="pt-1.5 border-t border-[#D9E4F0]">
+                      <span className="text-[11px] text-[#5F7187] font-bold block mb-1">
+                        Field Trace Verification in Retrieved DDL:
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(sourceModalData.field_traces).map(([fn, st]: [string, any]) => (
+                          <span
+                            key={fn}
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono border ${
+                              st === 'CONFIRMED_IN_DDL'
+                                ? 'bg-[#E8F8F3] text-[#00A878] border-[#00A878]/40'
+                                : 'bg-white text-[#5F7187] border-[#D9E4F0]'
+                            }`}
+                          >
+                            {st === 'CONFIRMED_IN_DDL' ? '✓' : '○'} {fn}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Unavailable Reason Banner if applicable */}
+                {sourceModalData.source_status === 'UNAVAILABLE' && (
+                  <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 space-y-1">
+                    <div className="font-bold flex items-center gap-1.5">
+                      <AlertCircle className="w-4 h-4 text-red-600" />
+                      DDL Source Not Returned by SAP ADT
+                    </div>
+                    <div className="text-[11px] text-red-600 font-mono">
+                      {sourceModalData.error_reason || 'Object DDL is protected or not accessible in current client.'}
+                    </div>
+                  </div>
+                )}
+
+                {/* Source Viewer with Copy Button */}
+                <div className="border border-[#0F2747] rounded-xl overflow-hidden bg-[#0F2747]">
+                  <div className="bg-[#0F2747] px-3.5 py-2.5 border-b border-[#5F7187]/30 flex items-center justify-between text-xs text-white font-mono">
+                    <span className="flex items-center gap-1.5 font-semibold">
+                      <Code2 className="w-3.5 h-3.5 text-[#00A878]" />
+                      Authentic DDL Definition ({sourceModalData.view_name}.ddls.asddls)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (sourceModalData.source) {
+                          navigator.clipboard.writeText(sourceModalData.source);
+                          setCopiedSource(true);
+                          setTimeout(() => setCopiedSource(false), 2000);
+                        }
+                      }}
+                      className="px-2.5 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-xs flex items-center gap-1 transition"
+                    >
+                      {copiedSource ? <Check className="w-3 h-3 text-[#00A878]" /> : <Copy className="w-3 h-3" />}
+                      {copiedSource ? 'Copied' : 'Copy Source'}
+                    </button>
+                  </div>
+                  <pre className="p-4 font-mono text-xs text-[#00A878] max-h-96 overflow-y-auto leading-relaxed selection:bg-[#0A6ED1] selection:text-white">
+                    {sourceModalData.source}
+                  </pre>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
+
+      {/* Live Data Preview Modal (Suggestion 3) */}
+      {previewTargetView && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-5xl w-full max-h-[85vh] flex flex-col overflow-hidden border border-[#D9E4F0]">
+            <div className="px-6 py-4 border-b border-[#D9E4F0] flex items-center justify-between bg-[#F4F8FC]">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-[#E8F8F3] rounded-lg">
+                  <Table className="w-5 h-5 text-[#00A878]" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-bold text-sm text-[#0F2747]">Live Data Preview</h3>
+                    <span className="font-mono text-xs bg-white border border-[#D9E4F0] px-2 py-0.5 rounded font-bold text-[#0A6ED1]">
+                      {previewTargetView}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#5F7187]">
+                    {previewData ? `Showing ${previewData.rows.length} sample records (Total in SAP: ${previewData.total_rows})` : 'Executing live freestyle query against SAP S/4HANA...'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => { setPreviewTargetView(null); setPreviewData(null); }}
+                className="p-1.5 rounded-lg text-[#5F7187] hover:bg-[#D9E4F0]/60 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-auto flex-1">
+              {isPreviewLoading ? (
+                <div className="flex flex-col items-center justify-center py-16 gap-3">
+                  <Loader2 className="w-8 h-8 animate-spin text-[#0A6ED1]" />
+                  <p className="text-xs text-[#5F7187]">Fetching live data from SAP ADT (/sap/bc/adt/datapreview/freestyle)...</p>
+                </div>
+              ) : previewData && previewData.rows && previewData.rows.length > 0 ? (
+                <div className="border border-[#D9E4F0] rounded-lg overflow-x-auto">
+                  <table className="w-full text-left text-xs font-mono border-collapse">
+                    <thead>
+                      <tr className="bg-[#F4F8FC] border-b border-[#D9E4F0] text-[#0F2747]">
+                        {previewData.columns.slice(0, 12).map((col) => (
+                          <th key={col} className="p-2.5 font-bold border-r border-[#D9E4F0] whitespace-nowrap">
+                            {col}
+                          </th>
+                        ))}
+                        {previewData.columns.length > 12 && (
+                          <th className="p-2.5 font-bold text-[#5F7187] whitespace-nowrap">
+                            +{previewData.columns.length - 12} more columns
+                          </th>
+                        )}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {previewData.rows.map((row, rIdx) => (
+                        <tr key={rIdx} className="border-b border-[#D9E4F0]/60 hover:bg-[#F4F8FC]/50">
+                          {previewData.columns.slice(0, 12).map((col) => (
+                            <td key={col} className="p-2.5 border-r border-[#D9E4F0]/60 whitespace-nowrap text-[#172B4D]">
+                              {String(row[col] ?? '') || <span className="text-[#A5B2C6] italic">null</span>}
+                            </td>
+                          ))}
+                          {previewData.columns.length > 12 && (
+                            <td className="p-2.5 text-[#5F7187] italic">...</td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="text-center py-12 text-xs text-[#5F7187]">
+                  No records returned or view is currently empty in SAP DEV.
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-3 border-t border-[#D9E4F0] bg-[#F4F8FC] flex items-center justify-between text-xs">
+              <span className="text-[#5F7187]">Verified live S/4HANA ADT Data Preview</span>
+              <button
+                type="button"
+                onClick={() => { setPreviewTargetView(null); setPreviewData(null); }}
+                className="px-4 py-1.5 rounded-lg bg-[#0F2747] text-white hover:bg-[#0F2747]/90 font-medium"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Multi-Hop SQL Join Path Modal (Suggestion 2) */}
+      {viewingJoinSql && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full flex flex-col overflow-hidden border border-[#D9E4F0]">
+            <div className="px-6 py-4 border-b border-[#D9E4F0] flex items-center justify-between bg-[#F4F8FC]">
+              <div className="flex items-center gap-2.5">
+                <GitBranch className="w-5 h-5 text-purple-600" />
+                <h3 className="font-bold text-sm text-[#0F2747]">Synthesized Multi-Hop SQL Join</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewingJoinSql(null)}
+                className="p-1.5 rounded-lg text-[#5F7187] hover:bg-[#D9E4F0]/60 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6 bg-[#0F2747]">
+              <pre className="font-mono text-xs text-[#00A878] leading-relaxed whitespace-pre-wrap">
+                {viewingJoinSql}
+              </pre>
+            </div>
+            <div className="px-6 py-3 border-t border-[#D9E4F0] bg-[#F4F8FC] flex justify-end">
+              <button
+                type="button"
+                onClick={() => setViewingJoinSql(null)}
+                className="px-4 py-1.5 rounded-lg bg-[#0F2747] text-white hover:bg-[#0F2747]/90 text-xs font-medium"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
-

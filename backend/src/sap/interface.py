@@ -7,7 +7,13 @@ PyRFC, or OData communication channels.
 
 from abc import ABC, abstractmethod
 from typing import List, Optional
-from src.models.domain import CDSCandidate, CDSLayer, ValidationResult
+from src.models.domain import (
+    CDSCandidate,
+    CDSLayer,
+    CDSReviewPackage,
+    SAPReviewCheckrunResult,
+    ValidationResult,
+)
 from src.sap.models import (
     ActivationResult,
     CDSMetadata,
@@ -135,3 +141,25 @@ class ISAPConnector(ABC):
             transport_request: Workbench Transport Request ID
         """
         pass
+
+    @abstractmethod
+    async def checkrun_cds_in_sap(
+        self,
+        review_package: CDSReviewPackage,
+    ) -> SAPReviewCheckrunResult:
+        """Executes a controlled read-only SAP ADT checkrun on an inactive CDS draft in SAP DEV.
+
+        Args:
+            review_package: Approved review package with target CDS object name and metadata.
+        """
+        pass
+
+    async def get_data_preview(self, cds_name: str, max_rows: int = 10) -> dict:
+        """Retrieves live data preview records for a CDS view from SAP S/4HANA."""
+        return {"cds_name": cds_name, "total_rows": 0, "columns": [], "rows": []}
+
+    async def get_transport_requests(self, user: Optional[str] = None) -> List[dict]:
+        """Retrieves active CTS workbench transport requests from SAP S/4HANA."""
+        return []
+
+

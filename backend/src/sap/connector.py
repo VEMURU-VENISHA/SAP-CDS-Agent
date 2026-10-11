@@ -8,7 +8,15 @@ from typing import List, Optional
 from src.config import Settings, get_settings
 from src.core.exceptions import SAPNotConnectedError
 from src.logging_config import logger
-from src.models.domain import CDSCandidate, CDSLayer, ValidationResult
+from src.models.domain import (
+    CDSCandidate,
+    CDSLayer,
+    CDSReviewPackage,
+    SAPCreationResult,
+    SAPActivationResult,
+    SAPReviewCheckrunResult,
+    ValidationResult,
+)
 from src.sap.interface import ISAPConnector
 from src.sap.models import (
     ActivationResult,
@@ -96,6 +104,22 @@ class UnconnectedSAPConnector(ISAPConnector):
         logger.warning(f"SAP create_cds_draft invoked while connector is unconnected: view_name='{view_name}'")
         raise SAPNotConnectedError("create_cds_draft")
 
+    async def create_cds_in_sap(
+        self,
+        review_package: CDSReviewPackage,
+        transport_request: Optional[str] = None,
+    ) -> SAPCreationResult:
+        logger.warning("SAP create_cds_in_sap invoked while connector is unconnected")
+        raise SAPNotConnectedError("create_cds_in_sap")
+
+    async def upload_source_to_existing_shell(
+        self,
+        review_package: CDSReviewPackage,
+        transport_request: Optional[str] = None,
+    ) -> SAPCreationResult:
+        logger.warning("SAP upload_source_to_existing_shell invoked while connector is unconnected")
+        raise SAPNotConnectedError("upload_source_to_existing_shell")
+
     async def validate_cds(
         self,
         view_definition: str,
@@ -110,6 +134,22 @@ class UnconnectedSAPConnector(ISAPConnector):
     ) -> ActivationResult:
         logger.warning(f"SAP activate_cds invoked while connector is unconnected: view_name='{view_name}'")
         raise SAPNotConnectedError("activate_cds")
+
+    async def activate_cds_in_sap(
+        self,
+        review_package: CDSReviewPackage,
+        transport_request: Optional[str] = None,
+    ) -> SAPActivationResult:
+        logger.warning("SAP activate_cds_in_sap invoked while connector is unconnected")
+        raise SAPNotConnectedError("activate_cds_in_sap")
+
+    async def checkrun_cds_in_sap(
+        self,
+        review_package: CDSReviewPackage,
+    ) -> SAPReviewCheckrunResult:
+        logger.warning("SAP checkrun_cds_in_sap invoked while connector is unconnected")
+        raise SAPNotConnectedError("checkrun_cds_in_sap")
+
 
 
 _connector_instance: Optional[ISAPConnector] = None

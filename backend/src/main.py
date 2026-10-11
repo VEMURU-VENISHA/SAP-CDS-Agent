@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from src.api.middleware.error_handler import register_exception_handlers
 from src.api.middleware.request_id import CorrelationIdMiddleware
-from src.api.router import api_v1_router
+from src.api.router import api_v1_router, api_legacy_router
 from src.config import get_settings
 from src.db.session import init_db
 from src.logging_config import logger, setup_logging
@@ -63,8 +63,9 @@ def create_application() -> FastAPI:
     # 3. Register global exception handlers
     register_exception_handlers(app)
 
-    # 4. Include API v1 Router
+    # 4. Include API v1 Router and legacy /api Router
     app.include_router(api_v1_router)
+    app.include_router(api_legacy_router)
 
     @app.get("/", include_in_schema=False)
     async def root():

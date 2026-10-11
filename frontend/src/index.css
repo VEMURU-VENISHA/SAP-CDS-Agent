@@ -3,28 +3,30 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  background-color: #030712;
-  color: #f3f4f6;
+  background-color: #F4F8FC;
+  color: #172B4D;
+  font-family: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-/* Custom scrollbars for enterprise look */
+/* Custom scrollbars for SAP enterprise look */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #111827;
+  background: #F4F8FC;
 }
 ::-webkit-scrollbar-thumb {
-  background: #374151;
+  background: #C2D1E0;
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #4b5563;
+  background: #9BB3CC;
 }
+

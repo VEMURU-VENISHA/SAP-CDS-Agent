@@ -21,10 +21,34 @@ The **SAP CDS Intelligence & Automation Platform** solves this by:
 
 ## 🔒 Enterprise Guardrails & Safety Architecture
 
-- **Zero Credentials in Code:** No SAP passwords, tokens, or private keys are stored.
-- **Strict Connector Abstraction:** Clear separation between platform reasoning and SAP communication protocols (RFC / ADT REST / OData).
+- **Zero Credentials in Code:** No SAP passwords, tokens, or private keys are stored; credentials reside exclusively in uncommitted local `.env`.
+- **Strict Connector Abstraction:** Clear separation between platform reasoning and SAP communication protocols (RFC / ADT REST).
 - **No Hallucinated SAP Objects:** The system never synthesizes fake tables or imaginary fields as real SAP objects.
-- **Mandatory Human-in-the-Loop:** Automated generation never activates objects in SAP DEV without explicit senior developer approval and an assigned Transport Request (TR).
+- **Dual-Gate Security Guard:** Pre-socket interceptor enforces mandatory human approval (`ReviewStatus.APPROVED`), kill switches (`SAP_DEV_WRITE_ENABLED=True`, `SAP_LIVE_READ_ONLY=False`), customer namespace (`Z*`/`Y*`), and CTS transport validation.
+- **Stateful Enqueue Locks:** Implements verified SAP ADT stateful session handling with atomic enqueue lock acquisition and release.
+
+---
+
+## 📊 Proven Capabilities & Scope Boundaries
+
+### ✅ Proven Real SAP DEV Capabilities (Milestones 8 – 13)
+* **Real SAP DEV Connectivity**: Authenticated TLS communication via native SAP ADT REST APIs.
+* **SAP CDS Discovery**: Live repository search (`GET /sap/bc/adt/repository/informationsystem/search`).
+* **SAP CDS Metadata Extraction**: Comprehensive parsing of live DDL sources and annotations.
+* **SAP Checkrun Validation**: Live compiler/syntax checks via `POST /sap/bc/adt/checkruns?reporters=abapCheckRun`.
+* **Multi-Candidate Semantic Mapping**: 6-level evidence hierarchy (L1 Exact to L6 Missing).
+* **Deterministic Decision Engine**: Grounded recommendations for `REUSE` → `EXTEND` → `CREATE`.
+* **Human Approval Review Gate**: Multi-role review console with blocking eligibility rules and audit logging.
+* **Real SAP DDLS Shell Creation**: Verified `POST /sap/bc/adt/ddic/ddl/sources?corrNr=...`.
+* **Real Stateful ADT Locking**: Stateful `POST ...?_action=LOCK&accessMode=MODIFY` enqueue lock acquisition.
+* **Real CDS Source Code Upload**: Verified stateful `PUT .../source/main?lockHandle=...&corrNr=...`.
+* **Real SAP ADT Activation**: Central `POST /sap/bc/adt/activation?method=activate&preauditRequested=true`.
+* **Post-Activation Verification**: Verified `ACTIVE` state via `GET /sap/bc/adt/activation/inactiveobjects` and read-back.
+
+### 🛑 Strictly Out of Scope / Not Implemented
+* **QA/PROD Transport Automation**: DEV→QA→PROD transport promotion is strictly blocked.
+* **Transport Release**: CTS Workbench transports (e.g. `S3XK911848`) remain open/unreleased.
+* **Autonomous Production Deployment**: No direct or un-gated deployment to production environments.
 
 ---
 
@@ -33,9 +57,9 @@ The **SAP CDS Intelligence & Automation Platform** solves this by:
 ```
                          +-----------------------------------+
                          |      Enterprise React Frontend     |
-                         |   (Vite, Tailwind, React Flow)    |
+                         |  (13-Step Interactive HITL Studio) |
                          +-----------------+-----------------+
-                                           | HTTP / SSE
+                                           | HTTP / REST
                                            v
                          +-----------------------------------+
                          |         FastAPI Backend           |
@@ -46,23 +70,20 @@ The **SAP CDS Intelligence & Automation Platform** solves this by:
                 |                                                     |
                 v                                                     v
 +-------------------------------+                     +-------------------------------+
-|     LangGraph Multi-Agent     |                     |     SAP Connector Contract    |
-| - Requirement Agent           |                     | (Abstract Protocol / RFC-ADT) |
-| - Discovery Agent             |                     | - search_cds()                |
-| - Semantic Mapping Agent      |                     | - get_cds_metadata()          |
-| - Decision Agent              |                     | - search_fields()             |
-| - Data Model Agent            |                     | - get_dependencies()          |
-| - CDS Generator Agent         |                     | - validate_cds()              |
-| - Validation Agent            |                     | - activate_cds()              |
-| - Governance Agent            |                     +---------------+---------------+
-| - Audit & Impact Agent        |                                     |
-+---------------+---------------+                                     | (Milestone 2+)
-                |                                                     v
-                v                                       +-------------------------------+
-+-------------------------------+                       |       SAP S/4HANA 2023        |
-|      PostgreSQL Database      |                       |    S4CORE 108 SP03 / ADT      |
-|  (Audit Trails, Decisions)    |                       +-------------------------------+
-+-------------------------------+
+|    Interactive Services Core  |                     |     SAP Connector Contract    |
+| - Gemini Extraction & Variant |                     | (Abstract Protocol / RFC-ADT) |
+| - Deterministic VDM Discovery |                     | - search_cds()                |
+| - CDS Generation & Validator  |                     | - get_cds_metadata()          |
+| - Review & Governance Store   |                     | - search_fields()             |
+| - Normalizer & Vocabulary     |                     | - validate_cds()              |
+| - Multi-Domain Index Engine   |                     | - activate_cds()              |
++---------------+---------------+                     +---------------+---------------+
+                |                                                     |
+                v                                                     v
++-------------------------------+                       +-------------------------------+
+|     Metadata & Review DB      |                       |       SAP S/4HANA 2023        |
+|  (SQLite VDM / Reviews Store) |                       |    S4CORE 108 SP03 / ADT      |
++-------------------------------+                       +-------------------------------+
 ```
 
 ---
@@ -81,14 +102,14 @@ SAP-CDS-Agent/
 │   │   ├── core/                # Custom exceptions, security abstractions
 │   │   ├── config.py            # Pydantic Settings configuration
 │   │   ├── logging_config.py    # Structured logging with request tracing
-│   │   ├── db/                  # SQLAlchemy async session management
+│   │   ├── db/                  # SQLite & async session management
 │   │   ├── models/              # Pydantic domain models & ORM entities
-│   │   ├── sap/                 # SAP Connector abstract interface & models
-│   │   └── agents/              # Multi-agent LangGraph workflow skeletons
+│   │   ├── sap/                 # SAP ADT Client, Connector, Parser & Models
+│   │   └── services/            # Discovery, Gemini, Validation & Review services
 │   └── tests/                   # Pytest test suite
 ├── frontend/                    # Vite + React 18 + TypeScript + Tailwind CSS
 │   ├── src/
-│   │   ├── components/          # Shell, Navigation, Dashboard, MetricCards
+│   │   ├── components/          # Header, 13-Step Interactive Pipeline Studio
 │   │   ├── services/            # Backend API client
 │   │   └── types/               # TypeScript models mirrored from backend
 └── .env.example                 # Environment configuration template
