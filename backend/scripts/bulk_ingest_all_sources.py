@@ -70,57 +70,66 @@ async def fetch_and_parse_view(client: SAPADTClient, sem: asyncio.Semaphore, vie
 
 
 def commit_batch(conn: sqlite3.Connection, results: list):
-    """Commits a batch of parsed views, joins, and associations into SQLite."""
-    c = conn.cursor()
-    c.execute("BEGIN TRANSACTION")
-    try:
-        for r in results:
-            cds_name = r["cds_name"]
-            ddl = r.get("ddl", "")
-            parent_name = r.get("parent_name")
+    """Commits a batch of parsed views, joins, and associations into SQLite with retry on lock."""
+    for attempt in range(5):
+        try:
+            c = conn.cursor()
+            c.execute("BEGIN TRANSACTION")
+            for r in results:
+                cds_name = r["cds_name"]
+                ddl = r.get("ddl", "")
+                parent_name = r.get("parent_name")
 
-            # 1. Update cds_views
-            if parent_name:
-                c.execute(
-                    "UPDATE cds_views SET source_code = ?, parent_name = ? WHERE cds_name = ?",
-                    (ddl, parent_name, cds_name),
-                )
-            else:
-                c.execute(
-                    "UPDATE cds_views SET source_code = ? WHERE cds_name = ?",
-                    (ddl, cds_name),
-                )
+                # 1. Update cds_views
+                if parent_name:
+                    c.execute(
+                        "UPDATE cds_views SET source_code = ?, parent_name = ? WHERE cds_name = ?",
+                        (ddl, parent_name, cds_name),
+                    )
+                else:
+                    c.execute(
+                        "UPDATE cds_views SET source_code = ? WHERE cds_name = ?",
+                        (ddl, cds_name),
+                    )
 
-            # 2. Insert extracted joins
-            joins = r.get("joins", [])
-            for j in joins:
-                joined_tbl = j.strip().upper()
-                c.execute(
-                    """
-                    INSERT OR REPLACE INTO cds_joins 
-                    (cds_name, left_entity, right_entity, join_type, left_fields, right_fields, cardinality, source_evidence)
-                    VALUES (?, ?, ?, 'JOIN', '[]', '[]', '1..*', 'Extracted from DDL')
-                    """,
-                    (cds_name, cds_name, joined_tbl),
-                )
+                # 2. Insert extracted joins
+                joins = r.get("joins", [])
+                for j in joins:
+                    joined_tbl = j.strip().upper()
+                    c.execute(
+                        """
+                        INSERT OR REPLACE INTO cds_joins 
+                        (cds_name, left_entity, right_entity, join_type, left_fields, right_fields, cardinality, source_evidence)
+                        VALUES (?, ?, ?, 'JOIN', '[]', '[]', '1..*', 'Extracted from DDL')
+                        """,
+                        (cds_name, cds_name, joined_tbl),
+                    )
 
-            # 3. Insert extracted associations
-            assocs = r.get("associations", [])
-            for alias, target, card, on_cond in assocs:
-                c.execute(
-                    """
-                    INSERT OR REPLACE INTO cds_associations
-                    (cds_name, target_entity, association_name, cardinality, on_condition)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (cds_name, target.strip().upper(), alias.strip(), card.strip(), on_cond.strip()[:200]),
-                )
+                # 3. Insert extracted associations
+                assocs = r.get("associations", [])
+                for alias, target, card, on_cond in assocs:
+                    c.execute(
+                        """
+                        INSERT OR REPLACE INTO cds_associations
+                        (cds_name, target_entity, association_name, cardinality, on_condition)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (cds_name, target.strip().upper(), alias.strip(), card.strip(), on_cond.strip()[:200]),
+                    )
 
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Failed to commit batch: {e}")
-        raise
+            conn.commit()
+            return
+        except sqlite3.OperationalError as oe:
+            conn.rollback()
+            if "locked" in str(oe).lower() and attempt < 4:
+                time.sleep(1.0 + attempt * 0.5)
+                continue
+            logger.error(f"Failed to commit batch due to SQLite lock: {oe}")
+            raise
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Failed to commit batch: {e}")
+            raise
 
 
 async def main():
@@ -140,7 +149,9 @@ async def main():
     print(f"Limit:         {'All remaining' if args.limit == 0 else args.limit}")
     print("=================================================================\n")
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=60.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     c = conn.cursor()
 
     # Query uningested views
