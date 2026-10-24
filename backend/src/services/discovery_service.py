@@ -530,6 +530,139 @@ class CDSDiscoveryService:
 
         return results
 
+    async def get_table_lineage(self, table_name: str) -> Dict[str, Any]:
+        """Discovers all CDS views that take a transparent SAP table as primary source, join, or association."""
+        clean_tbl = table_name.strip().upper()
+        if not clean_tbl:
+            return {"table_name": "", "description": "", "sources": [], "joins": [], "associations": [], "total_matches": 0}
+
+        table_descriptions = {
+            "MARA": "General Material Data",
+            "MAKT": "Material Descriptions",
+            "MARC": "Plant Data for Material",
+            "MARD": "Storage Location Data for Material",
+            "MBEW": "Material Valuation",
+            "ACDOCA": "Universal Journal Entry Line Items",
+            "BKPF": "Accounting Document Header",
+            "BSEG": "Accounting Document Segment",
+            "VBAK": "Sales Document Header Data",
+            "VBAP": "Sales Document Item Data",
+            "VBKD": "Sales District & Customer Business Data",
+            "VBRK": "Billing Document Header",
+            "VBRP": "Billing Document Item",
+            "LIKP": "SD Document: Delivery Header Data",
+            "LIPS": "SD Document: Delivery Item Data",
+            "EKKO": "Purchasing Document Header",
+            "EKPO": "Purchasing Document Item",
+            "KNA1": "General Data in Customer Master",
+            "KNVV": "Customer Master Sales Data",
+            "KNB1": "Customer Master (Company Code)",
+            "LFA1": "Vendor Master (General Section)",
+            "LFB1": "Vendor Master (Company Code)",
+            "BUT000": "BP: General Data I",
+            "T001": "Company Codes",
+            "T001K": "Valuation Areas",
+        }
+        desc = table_descriptions.get(clean_tbl, f"SAP Transparent Table {clean_tbl}")
+
+        sources: List[Dict[str, Any]] = []
+        joins: List[Dict[str, Any]] = []
+        associations: List[Dict[str, Any]] = []
+
+        with self._get_db() as conn:
+            c = conn.cursor()
+
+            # 1. Recursive Source Lineage: find direct and composite views
+            c.execute("""
+                WITH RECURSIVE lineage(view_name, parent, level) AS (
+                    SELECT cds_name, parent_name, 1 FROM cds_views WHERE UPPER(parent_name) = ?
+                    UNION ALL
+                    SELECT v.cds_name, v.parent_name, l.level + 1
+                    FROM cds_views v
+                    JOIN lineage l ON UPPER(v.parent_name) = UPPER(l.view_name)
+                )
+                SELECT l.view_name, l.parent, l.level, v.label, v.domain, v.source_type, v.package, v.application_component
+                FROM lineage l
+                LEFT JOIN cds_views v ON UPPER(l.view_name) = UPPER(v.cds_name)
+                ORDER BY l.level, l.view_name
+            """, (clean_tbl,))
+            for r in c.fetchall():
+                sources.append({
+                    "cds_name": r["view_name"],
+                    "parent_source": r["parent"],
+                    "level": r["level"],
+                    "label": r["label"] or r["view_name"],
+                    "domain": r["domain"] or "Core",
+                    "source_type": r["source_type"] or "CDS View Entity",
+                    "package": r["package"] or "SAP_STANDARD",
+                    "relationship_type": "PRIMARY_SOURCE" if r["level"] == 1 else "COMPOSITE_LINEAGE",
+                })
+
+            # Fallback if no recursive hits: check LIKE on parent_name or source_code
+            if not sources:
+                c.execute("""
+                    SELECT cds_name, parent_name, label, domain, source_type, package, application_component
+                    FROM cds_views
+                    WHERE UPPER(parent_name) LIKE ? OR UPPER(source_code) LIKE ?
+                    LIMIT 20
+                """, (f"%{clean_tbl}%", f"%FROM {clean_tbl}%"))
+                for r in c.fetchall():
+                    sources.append({
+                        "cds_name": r["cds_name"],
+                        "parent_source": r["parent_name"] or clean_tbl,
+                        "level": 1,
+                        "label": r["label"] or r["cds_name"],
+                        "domain": r["domain"] or "Core",
+                        "source_type": r["source_type"] or "CDS View Entity",
+                        "package": r["package"] or "SAP_STANDARD",
+                        "relationship_type": "PRIMARY_SOURCE",
+                    })
+
+            # 2. Joins
+            c.execute("""
+                SELECT DISTINCT j.left_entity, j.right_entity, j.join_type, v.label, v.domain
+                FROM cds_joins j
+                LEFT JOIN cds_views v ON UPPER(j.left_entity) = UPPER(v.cds_name)
+                WHERE UPPER(j.right_entity) = ?
+            """, (clean_tbl,))
+            for r in c.fetchall():
+                joins.append({
+                    "cds_name": r["left_entity"],
+                    "joined_table": r["right_entity"],
+                    "join_type": r["join_type"] or "LEFT OUTER JOIN",
+                    "label": r["label"] or r["left_entity"],
+                    "domain": r["domain"] or "Core",
+                })
+
+            # 3. Associations (Direct or via Primary Sources)
+            c.execute("""
+                SELECT DISTINCT a.cds_name, a.target_entity, a.association_name, a.cardinality, v.label, v.domain
+                FROM cds_associations a
+                LEFT JOIN cds_views v ON UPPER(a.cds_name) = UPPER(v.cds_name)
+                WHERE UPPER(a.target_entity) = ? OR UPPER(a.target_entity) IN (
+                    SELECT cds_name FROM cds_views WHERE UPPER(parent_name) = ?
+                )
+                LIMIT 50
+            """, (clean_tbl, clean_tbl))
+            for r in c.fetchall():
+                associations.append({
+                    "cds_name": r["cds_name"],
+                    "target_entity": r["target_entity"],
+                    "association_name": r["association_name"],
+                    "cardinality": r["cardinality"] or "[0..1]",
+                    "label": r["label"] or r["cds_name"],
+                    "domain": r["domain"] or "Core",
+                })
+
+        return {
+            "table_name": clean_tbl,
+            "description": desc,
+            "total_matches": len(sources) + len(joins) + len(associations),
+            "sources": sources,
+            "joins": joins,
+            "associations": associations,
+        }
+
     async def get_view_details(self, view_name: str) -> Optional[Dict[str, Any]]:
         """Returns full metadata for a single CDS view from local index or live SAP ADT."""
         clean_name = view_name.strip()

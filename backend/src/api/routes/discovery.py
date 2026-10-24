@@ -138,3 +138,10 @@ async def sync_incremental_endpoint(payload: Optional[IncrementalSyncPayload] = 
     return await discovery_svc.sync_incremental(prefixes=pfx, max_per_prefix=max_pfx)
 
 
+@router.get("/table-lineage/{table_name}", summary="Discovers all CDS views that take a transparent SAP table as source, join, or association")
+async def get_table_lineage_endpoint(table_name: str):
+    """Returns all CDS views that consume the specified SAP table as primary source, join, or association."""
+    return await discovery_svc.get_table_lineage(table_name)
+
+
+

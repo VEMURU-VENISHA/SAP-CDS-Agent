@@ -51,7 +51,8 @@ import {
   validateUserCode,
   fetchDataPreview,
   fetchTransportRequests,
-  runIncrementalSync
+  runIncrementalSync,
+  fetchTableLineage
 } from '../../services/api';
 import { HealthStatus, PipelineResult, DataPreviewResult, TransportRequestItem, IncrementalSyncResult } from '../../types';
 
@@ -96,6 +97,19 @@ interface ExtractedField {
   calculation_approach?: string;
 }
 
+const QUICK_SAP_TABLES = [
+  { code: 'MARA', desc: 'Material Master' },
+  { code: 'ACDOCA', desc: 'Universal Journal' },
+  { code: 'VBAK', desc: 'Sales Order Header' },
+  { code: 'VBAP', desc: 'Sales Order Item' },
+  { code: 'KNA1', desc: 'Customer Master' },
+  { code: 'EKKO', desc: 'Purchasing Header' },
+  { code: 'LIKP', desc: 'Delivery Header' },
+  { code: 'BUT000', desc: 'Business Partner' },
+  { code: 'MBEW', desc: 'Material Valuation' },
+  { code: 'MAKT', desc: 'Material Texts' },
+];
+
 export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisionApproved, health }) => {
   // Navigation & Stepper
   const [activeStep, setActiveStep] = useState<number>(0);
@@ -121,6 +135,14 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
   );
   const [selectedDomains, setSelectedDomains] = useState<string[]>(['Sales']);
   const [isAnalyzingReq, setIsAnalyzingReq] = useState(false);
+
+  // Step 1: Search by SAP Table Lineage State
+  const [intakeMode, setIntakeMode] = useState<'NATURAL_LANGUAGE' | 'SAP_TABLE'>('NATURAL_LANGUAGE');
+  const [tableSearchQuery, setTableSearchQuery] = useState('MARA');
+  const [tableLineageResult, setTableLineageResult] = useState<any | null>(null);
+  const [tableLineageLoading, setTableLineageLoading] = useState(false);
+  const [tableLineageError, setTableLineageError] = useState<string | null>(null);
+  const [selectedLineageCategory, setSelectedLineageCategory] = useState<'ALL' | 'SOURCES' | 'JOINS' | 'ASSOCIATIONS'>('ALL');
 
   // Step 2: Required Fields + Variants (HITL Gate 1 - Section 6)
   const [requiredFields, setRequiredFields] = useState<ExtractedField[]>([
@@ -398,6 +420,31 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
     } finally {
       setIsAnalyzingReq(false);
     }
+  };
+
+  // Step 1: Search by SAP Table Lineage Handler
+  const handleSearchTableLineage = async (tableNameOverride?: string) => {
+    const target = (tableNameOverride || tableSearchQuery).trim().toUpperCase();
+    if (!target) return;
+    setTableSearchQuery(target);
+    setTableLineageLoading(true);
+    setTableLineageError(null);
+    try {
+      const data = await fetchTableLineage(target);
+      setTableLineageResult(data);
+    } catch (err: any) {
+      setTableLineageError(err?.message || `Failed to fetch lineage for table ${target}`);
+      setTableLineageResult(null);
+    } finally {
+      setTableLineageLoading(false);
+    }
+  };
+
+  const handleUseLineageViewInRequirement = (cdsName: string, label: string, tbl: string) => {
+    setRequirementText(
+      `I need a CDS view for ${label || cdsName} based on ${cdsName} (SAP Table: ${tbl}) with relevant key dimensions and measures.`
+    );
+    setIntakeMode('NATURAL_LANGUAGE');
   };
 
   // Step 2: Editing fields & variants (HITL Gate 1 - Section 6)
@@ -1543,73 +1590,551 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
 
       {/* 3. STEP CONTENT AREA */}
 
-      {/* STEP 1: BUSINESS REQUIREMENT + MULTI-DOMAIN (Section 3A) */}
+      {/* STEP 1: BUSINESS REQUIREMENT + MULTI-DOMAIN OR SEARCH BY SAP TABLE */}
       {activeStep === 0 && (
         <div className="bg-white border border-[#D9E4F0] rounded-2xl p-6 space-y-6 shadow-sm">
-          <div className="flex items-center gap-2.5">
-            <Sparkles className="w-5 h-5 text-[#0A6ED1]" />
-            <div>
-              <h2 className="text-base font-bold text-[#0F2747]">Step 1 — Business Requirement &amp; Domain Selection</h2>
-              <p className="text-xs text-[#5F7187]">
-                Enter your natural-language business requirement and select applicable SAP functional domains.
-              </p>
-            </div>
-          </div>
-
-          <div className="space-y-5 max-w-3xl">
-            {/* Multi-Domain Selection (Section 3A) */}
-            <div>
-              <label className="text-xs font-bold text-[#0F2747] block mb-2">
-                Business Domains (Select one or multiple)
-              </label>
-              <div className="flex flex-wrap gap-2">
-                {AVAILABLE_DOMAINS.map((domain) => {
-                  const isSelected = selectedDomains.includes(domain);
-                  return (
-                    <button
-                      key={domain}
-                      type="button"
-                      onClick={() => toggleDomain(domain)}
-                      className={`px-3.5 py-1.5 rounded-full text-xs font-medium transition flex items-center gap-1.5 ${
-                        isSelected
-                          ? 'bg-[#0A6ED1] text-white shadow-xs'
-                          : 'bg-white border border-[#D9E4F0] text-[#0F2747] hover:bg-[#F4F8FC]'
-                      }`}
-                    >
-                      {isSelected ? <Check className="w-3 h-3" /> : null}
-                      {domain}
-                    </button>
-                  );
-                })}
+          {/* Header & Intake Mode Switcher */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#D9E4F0] pb-4">
+            <div className="flex items-center gap-2.5">
+              {intakeMode === 'NATURAL_LANGUAGE' ? (
+                <Sparkles className="w-5 h-5 text-[#0A6ED1]" />
+              ) : (
+                <Table className="w-5 h-5 text-[#00A878]" />
+              )}
+              <div>
+                <h2 className="text-base font-bold text-[#0F2747]">
+                  {intakeMode === 'NATURAL_LANGUAGE'
+                    ? 'Step 1 — Business Requirement & Domain Selection'
+                    : 'Step 1 — Search CDS Views by SAP Table'}
+                </h2>
+                <p className="text-xs text-[#5F7187]">
+                  {intakeMode === 'NATURAL_LANGUAGE'
+                    ? 'Enter your natural-language business requirement and select applicable SAP functional domains.'
+                    : 'Find standard & custom CDS views that use a transparent SAP table as primary source, join, or association.'}
+                </p>
               </div>
             </div>
 
-            {/* Requirement Text */}
-            <div>
-              <label className="text-xs font-bold text-[#0F2747]">Natural-Language Business Requirement</label>
-              <textarea
-                rows={5}
-                value={requirementText}
-                onChange={(e) => setRequirementText(e.target.value)}
-                placeholder="e.g. I need a CDS view for sales order analysis with sales order, customer, material, net amount, currency, company code and sales organization."
-                className="mt-1.5 w-full rounded-xl bg-white border border-[#D9E4F0] p-4 text-xs text-[#172B4D] outline-none focus:border-[#0A6ED1] focus:ring-1 focus:ring-[#0A6ED1] resize-none font-mono placeholder-[#5F7187]"
-              />
-            </div>
-
-            <div className="flex items-center justify-between pt-2">
-              <span className="text-[11px] text-[#5F7187]">
-                Gemini 3.5 Flash extracts required business fields and search variants without hallucinating SAP metadata.
-              </span>
+            {/* Segmented Mode Toggle */}
+            <div className="inline-flex p-1 bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl self-start sm:self-auto">
               <button
-                onClick={handleAnalyzeRequirement}
-                disabled={isAnalyzingReq || !requirementText.trim()}
-                className="px-6 py-2.5 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-2 transition shadow-sm"
+                type="button"
+                onClick={() => setIntakeMode('NATURAL_LANGUAGE')}
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition ${
+                  intakeMode === 'NATURAL_LANGUAGE'
+                    ? 'bg-white text-[#0A6ED1] shadow-xs'
+                    : 'text-[#5F7187] hover:text-[#0F2747]'
+                }`}
               >
-                {isAnalyzingReq ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                Analyze Requirement
+                <Sparkles className="w-3.5 h-3.5" />
+                Natural Language
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIntakeMode('SAP_TABLE');
+                  if (!tableLineageResult && !tableLineageLoading) {
+                    handleSearchTableLineage('MARA');
+                  }
+                }}
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition ${
+                  intakeMode === 'SAP_TABLE'
+                    ? 'bg-white text-[#00A878] shadow-xs'
+                    : 'text-[#5F7187] hover:text-[#0F2747]'
+                }`}
+              >
+                <Table className="w-3.5 h-3.5" />
+                Search by SAP Table
               </button>
             </div>
           </div>
+
+          {/* INTAKE MODE A: NATURAL LANGUAGE */}
+          {intakeMode === 'NATURAL_LANGUAGE' && (
+            <div className="space-y-5 max-w-3xl">
+              {/* Multi-Domain Selection (Section 3A) */}
+              <div>
+                <label className="text-xs font-bold text-[#0F2747] block mb-2">
+                  Business Domains (Select one or multiple)
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {AVAILABLE_DOMAINS.map((domain) => {
+                    const isSelected = selectedDomains.includes(domain);
+                    return (
+                      <button
+                        key={domain}
+                        type="button"
+                        onClick={() => toggleDomain(domain)}
+                        className={`px-3.5 py-1.5 rounded-full text-xs font-medium transition flex items-center gap-1.5 ${
+                          isSelected
+                            ? 'bg-[#0A6ED1] text-white shadow-xs'
+                            : 'bg-white border border-[#D9E4F0] text-[#0F2747] hover:bg-[#F4F8FC]'
+                        }`}
+                      >
+                        {isSelected ? <Check className="w-3 h-3" /> : null}
+                        {domain}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Requirement Text */}
+              <div>
+                <label className="text-xs font-bold text-[#0F2747]">Natural-Language Business Requirement</label>
+                <textarea
+                  rows={5}
+                  value={requirementText}
+                  onChange={(e) => setRequirementText(e.target.value)}
+                  placeholder="e.g. I need a CDS view for sales order analysis with sales order, customer, material, net amount, currency, company code and sales organization."
+                  className="mt-1.5 w-full rounded-xl bg-white border border-[#D9E4F0] p-4 text-xs text-[#172B4D] outline-none focus:border-[#0A6ED1] focus:ring-1 focus:ring-[#0A6ED1] resize-none font-mono placeholder-[#5F7187]"
+                />
+              </div>
+
+              <div className="flex items-center justify-between pt-2">
+                <span className="text-[11px] text-[#5F7187]">
+                  Gemini 3.5 Flash extracts required business fields and search variants without hallucinating SAP metadata.
+                </span>
+                <button
+                  onClick={handleAnalyzeRequirement}
+                  disabled={isAnalyzingReq || !requirementText.trim()}
+                  className="px-6 py-2.5 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-2 transition shadow-sm"
+                >
+                  {isAnalyzingReq ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                  Analyze Requirement
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* INTAKE MODE B: SEARCH BY SAP TABLE */}
+          {intakeMode === 'SAP_TABLE' && (
+            <div className="space-y-6">
+              {/* Search Bar & Quick Pills */}
+              <div className="space-y-3">
+                <div className="flex gap-2.5 max-w-2xl">
+                  <div className="relative flex-1">
+                    <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-[#5F7187]" />
+                    <input
+                      type="text"
+                      value={tableSearchQuery}
+                      onChange={(e) => setTableSearchQuery(e.target.value.toUpperCase())}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleSearchTableLineage();
+                      }}
+                      placeholder="Enter SAP Transparent Table (e.g. MARA, ACDOCA, VBAK, KNA1, EKKO)..."
+                      className="w-full pl-10 pr-4 py-2.5 bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl text-xs font-mono font-semibold text-[#0F2747] placeholder:text-[#5F7187] focus:outline-none focus:ring-2 focus:ring-[#00A878] focus:bg-white transition"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleSearchTableLineage()}
+                    disabled={tableLineageLoading || !tableSearchQuery.trim()}
+                    className="px-5 py-2.5 bg-[#00A878] hover:bg-[#00A878]/90 disabled:opacity-50 text-white text-xs font-bold rounded-xl flex items-center gap-2 shadow-sm transition"
+                  >
+                    {tableLineageLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                    Search Table Lineage
+                  </button>
+                </div>
+
+                {/* Quick Selection Pills */}
+                <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                  <span className="text-[11px] font-semibold text-[#5F7187] mr-1">Quick SAP Tables:</span>
+                  {QUICK_SAP_TABLES.map((t) => {
+                    const isActive = tableSearchQuery === t.code;
+                    return (
+                      <button
+                        key={t.code}
+                        type="button"
+                        onClick={() => handleSearchTableLineage(t.code)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-mono transition flex items-center gap-1.5 ${
+                          isActive
+                            ? 'bg-[#00A878] text-white font-bold shadow-xs'
+                            : 'bg-[#F4F8FC] border border-[#D9E4F0] text-[#0F2747] hover:bg-[#E8F8F3] hover:border-[#00A878]/40'
+                        }`}
+                        title={t.desc}
+                      >
+                        <span className="font-bold">{t.code}</span>
+                        <span className={`text-[10px] ${isActive ? 'text-white/80' : 'text-[#5F7187]'}`}>({t.desc})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Error Banner */}
+              {tableLineageError && (
+                <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{tableLineageError}</span>
+                </div>
+              )}
+
+              {/* Loading State */}
+              {tableLineageLoading && (
+                <div className="py-12 flex flex-col items-center justify-center gap-3 text-[#5F7187]">
+                  <Loader2 className="w-8 h-8 animate-spin text-[#00A878]" />
+                  <p className="text-xs font-medium">
+                    Querying SAP metadata catalog &amp; recursive lineage for table{' '}
+                    <span className="font-mono font-bold text-[#0F2747]">{tableSearchQuery}</span>...
+                  </p>
+                </div>
+              )}
+
+              {/* Results */}
+              {!tableLineageLoading && tableLineageResult && (
+                <div className="space-y-6 pt-2">
+                  {/* Table Summary Bar & Filter Tabs */}
+                  <div className="bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-[#00A878]/10 border border-[#00A878]/30 flex items-center justify-center text-[#00A878]">
+                        <Table className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-sm font-bold text-[#0F2747]">{tableLineageResult.table_name}</span>
+                          <span className="text-xs text-[#5F7187]">({tableLineageResult.description})</span>
+                        </div>
+                        <p className="text-[11px] text-[#5F7187]">
+                          Connected to <span className="font-bold text-[#0F2747]">{tableLineageResult.total_matches}</span> CDS view(s) via source inheritance, joins, or associations.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Filter Tabs */}
+                    <div className="flex items-center gap-1 bg-white border border-[#D9E4F0] rounded-lg p-1 self-start sm:self-auto">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedLineageCategory('ALL')}
+                        className={`px-3 py-1 rounded-md text-[11px] font-semibold transition ${
+                          selectedLineageCategory === 'ALL'
+                            ? 'bg-[#00A878] text-white shadow-xs'
+                            : 'text-[#5F7187] hover:text-[#0F2747]'
+                        }`}
+                      >
+                        All ({tableLineageResult.total_matches})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedLineageCategory('SOURCES')}
+                        className={`px-3 py-1 rounded-md text-[11px] font-semibold transition ${
+                          selectedLineageCategory === 'SOURCES'
+                            ? 'bg-[#00A878] text-white shadow-xs'
+                            : 'text-[#5F7187] hover:text-[#0F2747]'
+                        }`}
+                      >
+                        Sources ({tableLineageResult.sources?.length || 0})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedLineageCategory('JOINS')}
+                        className={`px-3 py-1 rounded-md text-[11px] font-semibold transition ${
+                          selectedLineageCategory === 'JOINS'
+                            ? 'bg-[#00A878] text-white shadow-xs'
+                            : 'text-[#5F7187] hover:text-[#0F2747]'
+                        }`}
+                      >
+                        Joins ({tableLineageResult.joins?.length || 0})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedLineageCategory('ASSOCIATIONS')}
+                        className={`px-3 py-1 rounded-md text-[11px] font-semibold transition ${
+                          selectedLineageCategory === 'ASSOCIATIONS'
+                            ? 'bg-[#00A878] text-white shadow-xs'
+                            : 'text-[#5F7187] hover:text-[#0F2747]'
+                        }`}
+                      >
+                        Associations ({tableLineageResult.associations?.length || 0})
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 1. SOURCE VIEWS (as select from <TABLE>) */}
+                  {(selectedLineageCategory === 'ALL' || selectedLineageCategory === 'SOURCES') && (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 border-b border-[#D9E4F0] pb-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-[#00A878]" />
+                        <h3 className="text-xs font-bold text-[#0F2747] uppercase tracking-wider">
+                          1. Source Views (as select from {tableLineageResult.table_name})
+                        </h3>
+                        <span className="text-[10px] bg-[#E8F8F3] text-[#00A878] font-bold px-2 py-0.5 rounded-full border border-[#00A878]/30">
+                          {tableLineageResult.sources?.length || 0} views
+                        </span>
+                      </div>
+
+                      {(!tableLineageResult.sources || tableLineageResult.sources.length === 0) ? (
+                        <p className="text-xs text-[#5F7187] italic p-3 bg-[#F4F8FC] rounded-xl border border-[#D9E4F0]">
+                          No direct or composite source views found for {tableLineageResult.table_name}.
+                        </p>
+                      ) : (
+                        <div className="grid grid-cols-1 gap-2.5">
+                          {tableLineageResult.sources.map((src: any) => (
+                            <div
+                              key={src.cds_name}
+                              className="p-3.5 bg-white border border-[#D9E4F0] hover:border-[#00A878] rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3 transition shadow-xs"
+                            >
+                              <div className="space-y-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-mono font-bold text-xs text-[#0A6ED1]">{src.cds_name}</span>
+                                  {src.relationship_type === 'PRIMARY_SOURCE' ? (
+                                    <span className="text-[10px] bg-[#E8F8F3] text-[#00A878] font-bold px-2 py-0.5 rounded-md border border-[#00A878]/30">
+                                      PRIMARY SOURCE
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded-md border border-blue-200">
+                                      COMPOSITE LINEAGE (Level {src.level})
+                                    </span>
+                                  )}
+                                  <span className="text-[10px] bg-gray-100 text-[#5F7187] px-2 py-0.5 rounded-md">
+                                    {src.domain}
+                                  </span>
+                                  {src.package && (
+                                    <span className="text-[10px] font-mono text-[#5F7187] bg-gray-50 px-1.5 py-0.5 rounded border border-gray-200">
+                                      {src.package}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-xs text-[#172B4D]">
+                                  <span className="font-medium">{src.label}</span>
+                                  {src.parent_source && (
+                                    <span className="text-[#5F7187] ml-2 text-[11px] font-mono">
+                                      (Parent: <span className="font-bold text-[#0F2747]">{src.parent_source}</span>)
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Actions */}
+                              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUseLineageViewInRequirement(
+                                      src.cds_name,
+                                      src.label,
+                                      tableLineageResult.table_name
+                                    )
+                                  }
+                                  className="px-3 py-1.5 rounded-lg bg-[#00A878] hover:bg-[#00A878]/90 text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs transition"
+                                  title="Use this CDS view in requirement analysis"
+                                >
+                                  <Sparkles className="w-3.5 h-3.5" />
+                                  Use in Pipeline
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenLiveSource(src.cds_name)}
+                                  className="px-3 py-1.5 rounded-lg bg-white border border-[#D9E4F0] text-[#0F2747] hover:bg-[#F4F8FC] text-xs font-medium flex items-center gap-1.5 transition"
+                                  title="View live DDL source from SAP ADT"
+                                >
+                                  <Code2 className="w-3.5 h-3.5 text-[#0A6ED1]" />
+                                  Live DDL
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenDataPreview(src.cds_name)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-white border border-[#D9E4F0] text-[#0F2747] hover:bg-[#F4F8FC] text-xs font-medium flex items-center gap-1 transition"
+                                  title="Preview live SAP data"
+                                >
+                                  <Eye className="w-3.5 h-3.5 text-[#5F7187]" />
+                                  Preview
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 2. JOINED VIEWS (join <TABLE>) */}
+                  {(selectedLineageCategory === 'ALL' || selectedLineageCategory === 'JOINS') && (
+                    <div className="space-y-3 pt-2">
+                      <div className="flex items-center gap-2 border-b border-[#D9E4F0] pb-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+                        <h3 className="text-xs font-bold text-[#0F2747] uppercase tracking-wider">
+                          2. Joined Views (join {tableLineageResult.table_name})
+                        </h3>
+                        <span className="text-[10px] bg-amber-50 text-amber-700 font-bold px-2 py-0.5 rounded-full border border-amber-200">
+                          {tableLineageResult.joins?.length || 0} views
+                        </span>
+                      </div>
+
+                      {(!tableLineageResult.joins || tableLineageResult.joins.length === 0) ? (
+                        <p className="text-xs text-[#5F7187] italic p-3 bg-[#F4F8FC] rounded-xl border border-[#D9E4F0]">
+                          No direct joins on table {tableLineageResult.table_name} found in catalog.
+                        </p>
+                      ) : (
+                        <div className="grid grid-cols-1 gap-2.5">
+                          {tableLineageResult.joins.map((j: any, idx: number) => (
+                            <div
+                              key={j.cds_name + idx}
+                              className="p-3.5 bg-white border border-[#D9E4F0] hover:border-amber-400 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3 transition shadow-xs"
+                            >
+                              <div className="space-y-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-mono font-bold text-xs text-[#0A6ED1]">{j.cds_name}</span>
+                                  <span className="text-[10px] bg-amber-50 text-amber-800 font-mono font-bold px-2 py-0.5 rounded-md border border-amber-200">
+                                    {j.join_type} {j.joined_table}
+                                  </span>
+                                  <span className="text-[10px] bg-gray-100 text-[#5F7187] px-2 py-0.5 rounded-md">
+                                    {j.domain}
+                                  </span>
+                                </div>
+                                <div className="text-xs text-[#172B4D]">
+                                  <span className="font-medium">{j.label}</span>
+                                </div>
+                              </div>
+
+                              {/* Actions */}
+                              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUseLineageViewInRequirement(
+                                      j.cds_name,
+                                      j.label,
+                                      tableLineageResult.table_name
+                                    )
+                                  }
+                                  className="px-3 py-1.5 rounded-lg bg-[#00A878] hover:bg-[#00A878]/90 text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs transition"
+                                  title="Use this CDS view in requirement analysis"
+                                >
+                                  <Sparkles className="w-3.5 h-3.5" />
+                                  Use in Pipeline
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenLiveSource(j.cds_name)}
+                                  className="px-3 py-1.5 rounded-lg bg-white border border-[#D9E4F0] text-[#0F2747] hover:bg-[#F4F8FC] text-xs font-medium flex items-center gap-1.5 transition"
+                                  title="View live DDL source from SAP ADT"
+                                >
+                                  <Code2 className="w-3.5 h-3.5 text-[#0A6ED1]" />
+                                  Live DDL
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenDataPreview(j.cds_name)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-white border border-[#D9E4F0] text-[#0F2747] hover:bg-[#F4F8FC] text-xs font-medium flex items-center gap-1 transition"
+                                  title="Preview live SAP data"
+                                >
+                                  <Eye className="w-3.5 h-3.5 text-[#5F7187]" />
+                                  Preview
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 3. ASSOCIATED VIEWS (association to <TABLE> / View) */}
+                  {(selectedLineageCategory === 'ALL' || selectedLineageCategory === 'ASSOCIATIONS') && (
+                    <div className="space-y-3 pt-2">
+                      <div className="flex items-center gap-2 border-b border-[#D9E4F0] pb-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-cyan-600" />
+                        <h3 className="text-xs font-bold text-[#0F2747] uppercase tracking-wider">
+                          3. Associated Views (association to {tableLineageResult.table_name} / Primary View)
+                        </h3>
+                        <span className="text-[10px] bg-cyan-50 text-cyan-700 font-bold px-2 py-0.5 rounded-full border border-cyan-200">
+                          {tableLineageResult.associations?.length || 0} views
+                        </span>
+                      </div>
+
+                      {(!tableLineageResult.associations || tableLineageResult.associations.length === 0) ? (
+                        <p className="text-xs text-[#5F7187] italic p-3 bg-[#F4F8FC] rounded-xl border border-[#D9E4F0]">
+                          No associations targeting table {tableLineageResult.table_name} or its primary views found.
+                        </p>
+                      ) : (
+                        <div className="grid grid-cols-1 gap-2.5">
+                          {tableLineageResult.associations.map((a: any, idx: number) => (
+                            <div
+                              key={a.cds_name + idx}
+                              className="p-3.5 bg-white border border-[#D9E4F0] hover:border-cyan-400 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3 transition shadow-xs"
+                            >
+                              <div className="space-y-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-mono font-bold text-xs text-[#0A6ED1]">{a.cds_name}</span>
+                                  <span className="text-[10px] bg-cyan-50 text-cyan-800 font-mono font-bold px-2 py-0.5 rounded-md border border-cyan-200">
+                                    association {a.cardinality} to {a.target_entity}
+                                  </span>
+                                  {a.association_name && (
+                                    <span className="text-[10px] bg-indigo-50 text-indigo-700 font-mono px-2 py-0.5 rounded-md border border-indigo-200">
+                                      as {a.association_name}
+                                    </span>
+                                  )}
+                                  <span className="text-[10px] bg-gray-100 text-[#5F7187] px-2 py-0.5 rounded-md">
+                                    {a.domain}
+                                  </span>
+                                </div>
+                                <div className="text-xs text-[#172B4D]">
+                                  <span className="font-medium">{a.label}</span>
+                                </div>
+                              </div>
+
+                              {/* Actions */}
+                              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUseLineageViewInRequirement(
+                                      a.cds_name,
+                                      a.label,
+                                      tableLineageResult.table_name
+                                    )
+                                  }
+                                  className="px-3 py-1.5 rounded-lg bg-[#00A878] hover:bg-[#00A878]/90 text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs transition"
+                                  title="Use this CDS view in requirement analysis"
+                                >
+                                  <Sparkles className="w-3.5 h-3.5" />
+                                  Use in Pipeline
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenLiveSource(a.cds_name)}
+                                  className="px-3 py-1.5 rounded-lg bg-white border border-[#D9E4F0] text-[#0F2747] hover:bg-[#F4F8FC] text-xs font-medium flex items-center gap-1.5 transition"
+                                  title="View live DDL source from SAP ADT"
+                                >
+                                  <Code2 className="w-3.5 h-3.5 text-[#0A6ED1]" />
+                                  Live DDL
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenDataPreview(a.cds_name)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-white border border-[#D9E4F0] text-[#0F2747] hover:bg-[#F4F8FC] text-xs font-medium flex items-center gap-1 transition"
+                                  title="Preview live SAP data"
+                                >
+                                  <Eye className="w-3.5 h-3.5 text-[#5F7187]" />
+                                  Preview
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Initial Empty State */}
+              {!tableLineageLoading && !tableLineageResult && !tableLineageError && (
+                <div className="py-12 border-2 border-dashed border-[#D9E4F0] rounded-2xl flex flex-col items-center justify-center text-center p-6 space-y-3">
+                  <div className="w-12 h-12 rounded-full bg-[#E8F8F3] text-[#00A878] flex items-center justify-center">
+                    <Table className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-[#0F2747]">Search CDS Lineage by SAP Transparent Table</h3>
+                    <p className="text-xs text-[#5F7187] max-w-md mt-1">
+                      Type any SAP ERP or S/4HANA transparent table above or click one of the quick table pills to inspect all connected CDS views categorized by Source, Join, and Association.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
