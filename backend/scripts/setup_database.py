@@ -88,12 +88,39 @@ def setup_database(force_repack: bool = False):
     print(f" -> Verified Joins:               {join_count:,}")
     print(f" -> FTS5 Full-Text Search Test:   {len(sample_fts)} results in {fts_latency_ms:.2f} ms")
 
-    print("\n=================================================================")
-    print(" SUCCESS: SQLite Database is ready for backend server startup!")
-    print(" Start backend with:  uvicorn src.main:app --port 8000 --reload")
+def pack_database():
+    """Optimizes, vacuums, and compresses sap_cds.db into sap_cds.db.gz for Git tracking."""
     print("=================================================================")
+    print("       SAP CDS Agent: Packing SQLite Database into sap_cds.db.gz  ")
+    print("=================================================================")
+    if not DB_PATH.exists():
+        print(f"Error: {DB_PATH} does not exist. Cannot pack.")
+        sys.exit(1)
+
+    print(f"1. Checkpointing WAL and optimizing {DB_PATH.name}...")
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.execute("VACUUM")
+    conn.close()
+
+    orig_size_mb = DB_PATH.stat().st_size / (1024 * 1024)
+    print(f"   Database optimized: {orig_size_mb:.2f} MB")
+
+    print(f"2. Compressing {DB_PATH.name} -> {GZ_PATH.name} (gzip)...", end=" ", flush=True)
+    t0 = time.time()
+    with open(DB_PATH, "rb") as f_in:
+        with gzip.open(GZ_PATH, "wb", compresslevel=6) as f_out:
+            shutil.copyfileobj(f_in, f_out)
+    dt = time.time() - t0
+    gz_size_mb = GZ_PATH.stat().st_size / (1024 * 1024)
+    print(f"DONE in {dt:.2f}s!")
+    print(f"   Compressed seed: {gz_size_mb:.2f} MB (Reduced by {100 - (gz_size_mb/orig_size_mb*100):.1f}%)")
+    print("\nSUCCESS: 'backend/data/sap_cds.db.gz' is ready to be committed to Git.")
 
 
 if __name__ == "__main__":
-    force = "--force" in sys.argv
-    setup_database(force_repack=force)
+    if "--pack" in sys.argv or "--compress" in sys.argv:
+        pack_database()
+    else:
+        force = "--force" in sys.argv
+        setup_database(force_repack=force)

@@ -306,10 +306,11 @@ export async function runIncrementalSync(prefixes?: string[], maxPerPrefix: numb
 }
 
 export async function fetchTableLineage(tableName: string) {
-  const res = await fetch(`${API_BASE}/discovery/table-lineage/${encodeURIComponent(tableName.trim())}`);
+  const clean = tableName.trim();
+  const res = await fetch(`${API_BASE}/discovery/table-lineage?tables=${encodeURIComponent(clean)}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err?.detail || `Failed to fetch lineage for table ${tableName}`);
+    throw new Error(err?.detail || `Failed to fetch lineage for table(s) ${tableName}`);
   }
   return res.json();
 }

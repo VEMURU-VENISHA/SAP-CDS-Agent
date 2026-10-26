@@ -100,6 +100,7 @@ interface ExtractedField {
 const QUICK_SAP_TABLES = [
   { code: 'MARA', desc: 'Material Master' },
   { code: 'ACDOCA', desc: 'Universal Journal' },
+  { code: 'MATDOC', desc: 'Material Documents' },
   { code: 'VBAK', desc: 'Sales Order Header' },
   { code: 'VBAP', desc: 'Sales Order Item' },
   { code: 'KNA1', desc: 'Customer Master' },
@@ -108,6 +109,13 @@ const QUICK_SAP_TABLES = [
   { code: 'BUT000', desc: 'Business Partner' },
   { code: 'MBEW', desc: 'Material Valuation' },
   { code: 'MAKT', desc: 'Material Texts' },
+];
+
+const QUICK_MULTI_TABLE_COMBOS = [
+  { label: 'ACDOCA + MATDOC', query: 'ACDOCA, MATDOC', desc: 'Finance & Material Movements' },
+  { label: 'MARA + VBAK', query: 'MARA, VBAK', desc: 'Products & Sales Orders' },
+  { label: 'VBAK + KNA1', query: 'VBAK, KNA1', desc: 'Sales & Customer Master' },
+  { label: 'EKKO + LFA1', query: 'EKKO, LFA1', desc: 'Purchasing & Vendor Master' },
 ];
 
 export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisionApproved, health }) => {
@@ -142,7 +150,7 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
   const [tableLineageResult, setTableLineageResult] = useState<any | null>(null);
   const [tableLineageLoading, setTableLineageLoading] = useState(false);
   const [tableLineageError, setTableLineageError] = useState<string | null>(null);
-  const [selectedLineageCategory, setSelectedLineageCategory] = useState<'ALL' | 'SOURCES' | 'JOINS' | 'ASSOCIATIONS'>('ALL');
+  const [selectedLineageCategory, setSelectedLineageCategory] = useState<'ALL' | 'COMBINED' | 'SOURCES' | 'JOINS' | 'ASSOCIATIONS'>('ALL');
 
   // Step 2: Required Fields + Variants (HITL Gate 1 - Section 6)
   const [requiredFields, setRequiredFields] = useState<ExtractedField[]>([
@@ -429,10 +437,13 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
     setTableSearchQuery(target);
     setTableLineageLoading(true);
     setTableLineageError(null);
+    console.log(`[SAP Table Lineage] Initiating search for table: '${target}'`);
     try {
       const data = await fetchTableLineage(target);
+      console.log(`[SAP Table Lineage] Received ${data?.total_matches || 0} matches for table '${target}':`, data);
       setTableLineageResult(data);
     } catch (err: any) {
+      console.error(`[SAP Table Lineage] Error fetching lineage for table '${target}':`, err);
       setTableLineageError(err?.message || `Failed to fetch lineage for table ${target}`);
       setTableLineageResult(null);
     } finally {
@@ -1183,6 +1194,10 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-sm font-bold text-[#0F2747]">{cand.cds_name}</span>
+              <span className="text-[10px] bg-emerald-50 text-emerald-700 font-bold px-2 py-0.5 rounded-md border border-emerald-300 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                CDS Enabled
+              </span>
               <span className="font-mono text-[10px] text-[#5F7187] bg-[#F4F8FC] border border-[#D9E4F0] px-1.5 py-0.5 rounded">
                 {candId}
               </span>
@@ -1722,7 +1737,7 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') handleSearchTableLineage();
                       }}
-                      placeholder="Enter SAP Transparent Table (e.g. MARA, ACDOCA, VBAK, KNA1, EKKO)..."
+                      placeholder="Enter SAP Table(s), e.g. MARA or ACDOCA, MATDOC or MARA, VBAK..."
                       className="w-full pl-10 pr-4 py-2.5 bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl text-xs font-mono font-semibold text-[#0F2747] placeholder:text-[#5F7187] focus:outline-none focus:ring-2 focus:ring-[#00A878] focus:bg-white transition"
                     />
                   </div>
@@ -1737,28 +1752,46 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                   </button>
                 </div>
 
-                {/* Quick Selection Pills */}
-                <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                  <span className="text-[11px] font-semibold text-[#5F7187] mr-1">Quick SAP Tables:</span>
-                  {QUICK_SAP_TABLES.map((t) => {
-                    const isActive = tableSearchQuery === t.code;
-                    return (
+                {/* Multi-Table Combos & Quick SAP Tables */}
+                <div className="space-y-2 pt-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-semibold text-[#5F7187] mr-1">Popular Multi-Table Combos:</span>
+                    {QUICK_MULTI_TABLE_COMBOS.map((combo) => (
                       <button
-                        key={t.code}
+                        key={combo.label}
                         type="button"
-                        onClick={() => handleSearchTableLineage(t.code)}
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-mono transition flex items-center gap-1.5 ${
-                          isActive
-                            ? 'bg-[#00A878] text-white font-bold shadow-xs'
-                            : 'bg-[#F4F8FC] border border-[#D9E4F0] text-[#0F2747] hover:bg-[#E8F8F3] hover:border-[#00A878]/40'
-                        }`}
-                        title={t.desc}
+                        onClick={() => handleSearchTableLineage(combo.query)}
+                        className="px-2.5 py-1 rounded-lg text-[11px] font-mono transition flex items-center gap-1.5 bg-gradient-to-r from-emerald-50 to-blue-50 border border-[#00A878]/30 hover:border-[#00A878] text-[#0F2747] shadow-2xs"
+                        title={combo.desc}
                       >
-                        <span className="font-bold">{t.code}</span>
-                        <span className={`text-[10px] ${isActive ? 'text-white/80' : 'text-[#5F7187]'}`}>({t.desc})</span>
+                        <Zap className="w-3 h-3 text-[#00A878]" />
+                        <span className="font-bold">{combo.label}</span>
                       </button>
-                    );
-                  })}
+                    ))}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                    <span className="text-[11px] font-semibold text-[#5F7187] mr-1">Quick Individual Tables:</span>
+                    {QUICK_SAP_TABLES.map((t) => {
+                      const isActive = tableSearchQuery === t.code;
+                      return (
+                        <button
+                          key={t.code}
+                          type="button"
+                          onClick={() => handleSearchTableLineage(t.code)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-mono transition flex items-center gap-1.5 ${
+                            isActive
+                              ? 'bg-[#00A878] text-white font-bold shadow-xs'
+                              : 'bg-[#F4F8FC] border border-[#D9E4F0] text-[#0F2747] hover:bg-[#E8F8F3] hover:border-[#00A878]/40'
+                          }`}
+                          title={t.desc}
+                        >
+                          <span className="font-bold">{t.code}</span>
+                          <span className={`text-[10px] ${isActive ? 'text-white/80' : 'text-[#5F7187]'}`}>({t.desc})</span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
@@ -1775,7 +1808,7 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                 <div className="py-12 flex flex-col items-center justify-center gap-3 text-[#5F7187]">
                   <Loader2 className="w-8 h-8 animate-spin text-[#00A878]" />
                   <p className="text-xs font-medium">
-                    Querying SAP metadata catalog &amp; recursive lineage for table{' '}
+                    Querying SAP metadata catalog &amp; recursive lineage for table(s){' '}
                     <span className="font-mono font-bold text-[#0F2747]">{tableSearchQuery}</span>...
                   </p>
                 </div>
@@ -1791,18 +1824,48 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                         <Table className="w-5 h-5" />
                       </div>
                       <div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="font-mono text-sm font-bold text-[#0F2747]">{tableLineageResult.table_name}</span>
                           <span className="text-xs text-[#5F7187]">({tableLineageResult.description})</span>
+                          <span className="inline-flex items-center gap-1 text-[10px] bg-emerald-50 text-emerald-700 font-bold px-2 py-0.5 rounded-full border border-emerald-300">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                            CDS Enabled (100% Enforced)
+                          </span>
+                          {tableLineageResult.query_time_ms !== undefined && (
+                            <span className="inline-flex items-center gap-1 text-[10px] bg-blue-50 text-[#0A6ED1] font-mono font-bold px-2 py-0.5 rounded-full border border-blue-200">
+                              ⚡ {tableLineageResult.query_time_ms}ms (86,298 views)
+                            </span>
+                          )}
                         </div>
-                        <p className="text-[11px] text-[#5F7187]">
-                          Connected to <span className="font-bold text-[#0F2747]">{tableLineageResult.total_matches}</span> CDS view(s) via source inheritance, joins, or associations.
+                        <p className="text-[11px] text-[#5F7187] mt-0.5">
+                          {tableLineageResult.is_multi_table ? (
+                            <>
+                              Found <span className="font-bold text-[#00A878]">{tableLineageResult.total_combined_matches}</span> combined CDS view(s) connecting all requested tables, and <span className="font-bold text-[#0F2747]">{tableLineageResult.total_matches}</span> total related views.
+                            </>
+                          ) : (
+                            <>
+                              Discovered <span className="font-bold text-[#0F2747]">{tableLineageResult.total_matches}</span> verified CDS view(s) consuming this table across <span className="font-semibold text-[#00A878]">as select from</span>, <span className="font-semibold text-amber-600">join</span>, or <span className="font-semibold text-cyan-600">association</span> clauses.
+                            </>
+                          )}
                         </p>
                       </div>
                     </div>
 
                     {/* Filter Tabs */}
-                    <div className="flex items-center gap-1 bg-white border border-[#D9E4F0] rounded-lg p-1 self-start sm:self-auto">
+                    <div className="flex flex-wrap items-center gap-1 bg-white border border-[#D9E4F0] rounded-lg p-1 self-start sm:self-auto">
+                      {tableLineageResult.is_multi_table && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedLineageCategory('COMBINED')}
+                          className={`px-3 py-1 rounded-md text-[11px] font-semibold transition ${
+                            selectedLineageCategory === 'COMBINED'
+                              ? 'bg-[#00A878] text-white shadow-xs'
+                              : 'text-[#5F7187] hover:text-[#0F2747]'
+                          }`}
+                        >
+                          Combined Views ({tableLineageResult.combined_views?.length || 0})
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => setSelectedLineageCategory('ALL')}
@@ -1822,8 +1885,9 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                             ? 'bg-[#00A878] text-white shadow-xs'
                             : 'text-[#5F7187] hover:text-[#0F2747]'
                         }`}
+                        title="Views that query the table via 'as select from'"
                       >
-                        Sources ({tableLineageResult.sources?.length || 0})
+                        as select from ({tableLineageResult.sources?.length || 0})
                       </button>
                       <button
                         type="button"
@@ -1833,8 +1897,9 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                             ? 'bg-[#00A878] text-white shadow-xs'
                             : 'text-[#5F7187] hover:text-[#0F2747]'
                         }`}
+                        title="Views that connect the table via 'join'"
                       >
-                        Joins ({tableLineageResult.joins?.length || 0})
+                        join ({tableLineageResult.joins?.length || 0})
                       </button>
                       <button
                         type="button"
@@ -1844,11 +1909,118 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                             ? 'bg-[#00A878] text-white shadow-xs'
                             : 'text-[#5F7187] hover:text-[#0F2747]'
                         }`}
+                        title="Views that define an 'association' to the table"
                       >
-                        Associations ({tableLineageResult.associations?.length || 0})
+                        association ({tableLineageResult.associations?.length || 0})
                       </button>
                     </div>
                   </div>
+
+                  {/* MULTI-TABLE COMBINED VIEWS (Connecting ALL requested tables) */}
+                  {tableLineageResult.is_multi_table && (selectedLineageCategory === 'ALL' || selectedLineageCategory === 'COMBINED') && (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 border-b border-[#00A878]/40 pb-2">
+                        <Sparkles className="w-4 h-4 text-[#00A878]" />
+                        <h3 className="text-xs font-bold text-[#0F2747] uppercase tracking-wider">
+                          Combined CDS Views Connecting ALL Tables ({tableLineageResult.requested_tables?.join(' + ')})
+                        </h3>
+                        <span className="text-[10px] bg-[#E8F8F3] text-[#00A878] font-bold px-2.5 py-0.5 rounded-full border border-[#00A878]/30">
+                          {tableLineageResult.combined_views?.length || 0} views
+                        </span>
+                      </div>
+
+                      {(!tableLineageResult.combined_views || tableLineageResult.combined_views.length === 0) ? (
+                        <div className="p-4 bg-amber-50/60 rounded-xl border border-amber-200 text-xs text-amber-800 space-y-1">
+                          <p className="font-bold">No single CDS view connects both {tableLineageResult.requested_tables?.join(' and ')} in one view.</p>
+                          <p className="text-[11px] text-amber-700">
+                            You can build a new composite CDS view by selecting views from the individual table source / join tabs below!
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 gap-2.5">
+                          {tableLineageResult.combined_views.map((cv: any) => (
+                            <div
+                              key={cv.cds_name}
+                              className="p-4 bg-gradient-to-r from-emerald-50/40 via-white to-blue-50/40 border-2 border-[#00A878]/40 hover:border-[#00A878] rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3 transition shadow-xs"
+                            >
+                              <div className="space-y-1.5">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-mono font-bold text-sm text-[#0A6ED1]">{cv.cds_name}</span>
+                                  <span className="text-[10px] bg-emerald-50 text-emerald-700 font-bold px-2 py-0.5 rounded-md border border-emerald-300 flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                    CDS Enabled
+                                  </span>
+                                  <span className="text-[10px] bg-[#E8F8F3] text-[#00A878] font-bold px-2 py-0.5 rounded-md border border-[#00A878]/30">
+                                    COMBINED PROVENANCE
+                                  </span>
+                                  <span className="text-[10px] bg-gray-100 text-[#5F7187] px-2 py-0.5 rounded-md font-medium">
+                                    {cv.domain}
+                                  </span>
+                                  {cv.package && (
+                                    <span className="text-[10px] font-mono text-[#5F7187] bg-gray-50 px-1.5 py-0.5 rounded border border-gray-200">
+                                      {cv.package}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-xs text-[#172B4D] font-medium">
+                                  {cv.label}
+                                </div>
+                                {/* How this view links both tables */}
+                                <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                                  <span className="text-[11px] text-[#5F7187] font-semibold">Table Linkage:</span>
+                                  {Object.entries(cv.table_roles || {}).map(([tbl, role]) => (
+                                    <span
+                                      key={tbl}
+                                      className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-white border border-[#D9E4F0] text-[#0F2747] shadow-2xs"
+                                    >
+                                      <span className="text-[#0A6ED1]">{tbl}</span>: <span className="text-[#00A878]">{String(role)}</span>
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+
+                              {/* Actions */}
+                              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUseLineageViewInRequirement(
+                                      cv.cds_name,
+                                      cv.label,
+                                      tableLineageResult.requested_tables?.join(' + ') || tableLineageResult.table_name
+                                    )
+                                  }
+                                  className="px-3.5 py-1.5 rounded-lg bg-[#00A878] hover:bg-[#00A878]/90 text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs transition"
+                                  title="Use this combined CDS view in requirement analysis"
+                                >
+                                  <Sparkles className="w-3.5 h-3.5" />
+                                  Use in Pipeline
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenLiveSource(cv.cds_name)}
+                                  className="px-3 py-1.5 rounded-lg bg-white border border-[#D9E4F0] text-[#0F2747] hover:bg-[#F4F8FC] text-xs font-medium flex items-center gap-1.5 transition"
+                                  title="View live DDL source from SAP ADT"
+                                >
+                                  <Code2 className="w-3.5 h-3.5 text-[#0A6ED1]" />
+                                  Live DDL
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenDataPreview(cv.cds_name)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-white border border-[#D9E4F0] text-[#0F2747] hover:bg-[#F4F8FC] text-xs font-medium flex items-center gap-1 transition"
+                                  title="Preview live SAP data"
+                                >
+                                  <Eye className="w-3.5 h-3.5 text-[#5F7187]" />
+                                  Preview
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* 1. SOURCE VIEWS (as select from <TABLE>) */}
                   {(selectedLineageCategory === 'ALL' || selectedLineageCategory === 'SOURCES') && (
@@ -1877,6 +2049,13 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                               <div className="space-y-1">
                                 <div className="flex flex-wrap items-center gap-2">
                                   <span className="font-mono font-bold text-xs text-[#0A6ED1]">{src.cds_name}</span>
+                                  <span className="text-[10px] bg-emerald-50 text-emerald-700 font-bold px-2 py-0.5 rounded-md border border-emerald-300 flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                    CDS Enabled
+                                  </span>
+                                  <span className="text-[10px] bg-[#E8F8F3] text-[#00A878] font-mono font-bold px-2 py-0.5 rounded-md border border-[#00A878]/30">
+                                    as select from
+                                  </span>
                                   {src.relationship_type === 'PRIMARY_SOURCE' ? (
                                     <span className="text-[10px] bg-[#E8F8F3] text-[#00A878] font-bold px-2 py-0.5 rounded-md border border-[#00A878]/30">
                                       PRIMARY SOURCE
@@ -1975,7 +2154,14 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                               <div className="space-y-1">
                                 <div className="flex flex-wrap items-center gap-2">
                                   <span className="font-mono font-bold text-xs text-[#0A6ED1]">{j.cds_name}</span>
-                                  <span className="text-[10px] bg-amber-50 text-amber-800 font-mono font-bold px-2 py-0.5 rounded-md border border-amber-200">
+                                  <span className="text-[10px] bg-emerald-50 text-emerald-700 font-bold px-2 py-0.5 rounded-md border border-emerald-300 flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                    CDS Enabled
+                                  </span>
+                                  <span className="text-[10px] bg-amber-50 text-amber-800 font-mono font-bold px-2 py-0.5 rounded-md border border-amber-300">
+                                    join
+                                  </span>
+                                  <span className="text-[10px] bg-gray-50 text-gray-700 font-mono px-2 py-0.5 rounded-md border border-gray-200">
                                     {j.join_type} {j.joined_table}
                                   </span>
                                   <span className="text-[10px] bg-gray-100 text-[#5F7187] px-2 py-0.5 rounded-md">
@@ -2057,6 +2243,13 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                               <div className="space-y-1">
                                 <div className="flex flex-wrap items-center gap-2">
                                   <span className="font-mono font-bold text-xs text-[#0A6ED1]">{a.cds_name}</span>
+                                  <span className="text-[10px] bg-emerald-50 text-emerald-700 font-bold px-2 py-0.5 rounded-md border border-emerald-300 flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                    CDS Enabled
+                                  </span>
+                                  <span className="text-[10px] bg-purple-50 text-purple-800 font-mono font-bold px-2 py-0.5 rounded-md border border-purple-300">
+                                    association
+                                  </span>
                                   <span className="text-[10px] bg-cyan-50 text-cyan-800 font-mono font-bold px-2 py-0.5 rounded-md border border-cyan-200">
                                     association {a.cardinality} to {a.target_entity}
                                   </span>
@@ -2446,15 +2639,25 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
         <div className="bg-white border border-[#D9E4F0] rounded-2xl p-6 space-y-6 shadow-sm">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div>
-              <h2 className="text-base font-bold text-[#0F2747]">Step 4 — CDS Recommendations</h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-bold text-[#0F2747]">Step 4 — CDS Recommendations</h2>
+                <span className="inline-flex items-center gap-1 text-[10px] bg-emerald-50 text-emerald-700 font-bold px-2 py-0.5 rounded-full border border-emerald-300">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  CDS Enabled Only (100% Enforced)
+                </span>
+              </div>
               <p className="text-xs text-[#5F7187]">
-                Complete result set ({allCandidates.length} relevant candidates discovered, zero hard cutoff).
+                Complete result set ({allCandidates.length} verified CDS View Entity candidates discovered, zero hard cutoff).
               </p>
             </div>
 
             {/* Search Statistics Card (Section 40 & Section 9 & Section 19) */}
             {discoveryStats && (
               <div className="bg-[#F4F8FC] border border-[#D9E4F0] rounded-xl px-4 py-2.5 flex flex-wrap gap-4 text-xs font-mono text-[#172B4D]">
+                <div className="flex items-center gap-1 text-emerald-700 font-bold">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  <span>CDS Enabled Views Only</span>
+                </div>
                 <div>
                   <span className="text-[#5F7187]">Search Time:</span>{' '}
                   <span className="text-[#0A6ED1] font-semibold">{discoveryStats.search_time_ms} ms</span>

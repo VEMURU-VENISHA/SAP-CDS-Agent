@@ -3,6 +3,7 @@
 from typing import List, Optional
 from fastapi import APIRouter, Query
 from src.models.domain import CDSCandidate, CDSLayer
+from src.logging_config import logger
 from src.sap.connector import get_sap_connector
 from src.sap.models import SAPSystemInfo, CDSMetadata
 
@@ -138,10 +139,38 @@ async def sync_incremental_endpoint(payload: Optional[IncrementalSyncPayload] = 
     return await discovery_svc.sync_incremental(prefixes=pfx, max_per_prefix=max_pfx)
 
 
-@router.get("/table-lineage/{table_name}", summary="Discovers all CDS views that take a transparent SAP table as source, join, or association")
+@router.get("/table-lineage", summary="Discovers CDS views that consume one or multiple SAP tables as source, join, or association")
+async def get_table_lineage_query(tables: str = Query(..., description="SAP transparent table name(s), comma, space, or 'and' separated")):
+    """Returns CDS views consuming the specified SAP table(s) as primary source, join, or association."""
+    tbl_clean = tables.strip()
+    print(f"\n>>> [SAP-CDS-AGENT] Table Lineage Query Received: '{tbl_clean}' <<<", flush=True)
+    logger.info(f"[TableLineage] Searching CDS views for transparent table(s): {tbl_clean}")
+    result = await discovery_svc.get_table_lineage(tbl_clean)
+    total = result.get("total_matches", 0)
+    comb_cnt = result.get("total_combined_matches", 0)
+    print(
+        f">>> [SAP-CDS-AGENT] Lineage Result for '{tbl_clean}': {total} matches "
+        f"({comb_cnt} combined views linking all tables) <<<\n",
+        flush=True,
+    )
+    return result
+
+
+@router.get("/table-lineage/{table_name:path}", summary="Discovers all CDS views that take a transparent SAP table as source, join, or association")
 async def get_table_lineage_endpoint(table_name: str):
     """Returns all CDS views that consume the specified SAP table as primary source, join, or association."""
-    return await discovery_svc.get_table_lineage(table_name)
+    tbl = table_name.strip()
+    print(f"\n>>> [SAP-CDS-AGENT] Table Lineage Path Received: '{tbl}' <<<", flush=True)
+    logger.info(f"[TableLineage] Searching CDS views for transparent table(s): {tbl}")
+    result = await discovery_svc.get_table_lineage(tbl)
+    total = result.get("total_matches", 0)
+    comb_cnt = result.get("total_combined_matches", 0)
+    print(
+        f">>> [SAP-CDS-AGENT] Lineage Result for '{tbl}': {total} matches "
+        f"({comb_cnt} combined views linking all tables) <<<\n",
+        flush=True,
+    )
+    return result
 
 
 

@@ -160,6 +160,38 @@ class CDSDDLParser:
         if current:
             items.append("".join(current).strip())
 
+        # Check view entity syntax
+        is_view_entity = bool(re.search(r"\bdefine\s+(?:root\s+|custom\s+)?view\s+entity\b", clean, re.IGNORECASE))
+
+        # Check key elements
+        key_matches = re.findall(r"\bkey\s+(?:[a-zA-Z0-9_\$]+\.)?([a-zA-Z0-9_]+)", select_clause, re.IGNORECASE)
+        has_key = len(key_matches) > 0
+
+        # Check trailing comma
+        has_trailing_comma = bool(re.search(r",\s*\}", clean))
+
+        # Check aggregate and group by
+        has_aggregate = bool(re.search(r"\b(sum|avg|min|max|count)\s*\(", select_clause, re.IGNORECASE))
+        has_group_by = bool(re.search(r"\bgroup\s+by\b", clean, re.IGNORECASE))
+
+        # Check projection fields
+        projection_fields_used = re.findall(r"\$projection\.([a-zA-Z0-9_]+)", clean, re.IGNORECASE)
+
+        # Build set of declared association aliases
+        assoc_aliases = {j["alias"].upper() for j in joins if j.get("alias")} | {j["target_entity"].upper() for j in joins}
+        exposed_associations = set()
+
+        # Extract projected element names
+        projected_names = []
+        for item in items:
+            as_m = re.search(r"\bas\s+([a-zA-Z0-9_]+)", item, re.IGNORECASE)
+            if as_m:
+                projected_names.append(as_m.group(1).upper())
+            else:
+                toks = re.findall(r"[a-zA-Z0-9_]+", item)
+                if toks:
+                    projected_names.append(toks[-1].upper())
+
         for item in items:
             if not item:
                 continue
@@ -177,6 +209,11 @@ class CDSDDLParser:
 
                 field_u = field_name.upper()
                 if field_u in RESERVED_WORDS:
+                    continue
+
+                # Check if this token is an exposed association name, not a database field
+                if len(parts) == 1 and field_u in assoc_aliases:
+                    exposed_associations.add(field_u)
                     continue
 
                 if len(parts) == 1:
@@ -228,6 +265,15 @@ class CDSDDLParser:
             "views_used": views_used,
             "select_clause": select_clause,
             "annotations": annotations,
+            "is_view_entity": is_view_entity,
+            "has_key": has_key,
+            "key_fields": key_matches,
+            "has_trailing_comma": has_trailing_comma,
+            "has_aggregate": has_aggregate,
+            "has_group_by": has_group_by,
+            "projection_fields_used": projection_fields_used,
+            "projected_names": projected_names,
+            "exposed_associations": exposed_associations,
         }
 
 
@@ -388,6 +434,12 @@ class CDSGenerationValidator:
             err_msg = f"Generated target entity name '{parsed['target_entity']}' does not match target artifact name '{artifact_name}'."
             errors.append(err_msg)
             structured_errors.append({"type": "TARGET_NAME_MISMATCH", "message": err_msg})
+
+        # 0. Validate ABAP CDS View Entity Syntax Rules (Clean Core, Key elements, Trailing commas, Projections, Group By)
+        syntax_res = cls.validate_syntax_rules(parsed, ddl_source)
+        errors.extend(syntax_res["errors"])
+        structured_errors.extend(syntax_res["structured_errors"])
+        warnings.extend(syntax_res["warnings"])
 
         # 1. Validate Source Views & CDS Invention/Omission
         view_res = cls.validate_source_views(parsed, selected_views, join_paths, mappings)
@@ -922,3 +974,54 @@ class CDSGenerationValidator:
                     })
 
         return {"errors": errors, "structured_errors": structured_errors}
+
+    @classmethod
+    def validate_syntax_rules(cls, parsed: Dict[str, Any], ddl_source: str) -> Dict[str, Any]:
+        """Validates critical SAP ABAP CDS View Entity syntax and Clean Core constraints."""
+        errors: List[str] = []
+        structured_errors: List[Dict[str, Any]] = []
+        warnings: List[str] = []
+
+        # 1. Define View Entity (Clean Core standard)
+        if not parsed.get("is_view_entity"):
+            err_msg = "SYNTAX_ERROR: CDS must be defined as 'define view entity' (Clean Core S/4HANA standard), not classic 'define view'."
+            errors.append(err_msg)
+            structured_errors.append({"type": "SYNTAX_ERROR", "rule": "VIEW_ENTITY_REQUIRED", "message": err_msg})
+
+        # 2. Mandatory Key Element
+        if not parsed.get("has_key"):
+            err_msg = "SYNTAX_ERROR: CDS View Entity must have at least one element marked with 'key'."
+            errors.append(err_msg)
+            structured_errors.append({"type": "SYNTAX_ERROR", "rule": "MISSING_KEY_ELEMENT", "message": err_msg})
+
+        # 3. No Trailing Comma before '}'
+        if parsed.get("has_trailing_comma"):
+            err_msg = "SYNTAX_ERROR: Trailing comma found before closing brace '}'. Illegal in SAP ABAP CDS syntax."
+            errors.append(err_msg)
+            structured_errors.append({"type": "SYNTAX_ERROR", "rule": "TRAILING_COMMA", "message": err_msg})
+
+        # 4. Projection Field References in ON condition
+        projected_names = set(parsed.get("projected_names", []))
+        for pf in parsed.get("projection_fields_used", []):
+            if pf.upper() not in projected_names:
+                err_msg = f"SYNTAX_ERROR: Association condition references '$projection.{pf}', but element '{pf}' is not in the SELECT list."
+                errors.append(err_msg)
+                structured_errors.append({"type": "SYNTAX_ERROR", "rule": "PROJECTION_FIELD_MISSING", "field": pf, "message": err_msg})
+
+        # 5. Aggregate functions require GROUP BY
+        if parsed.get("has_aggregate") and not parsed.get("has_group_by"):
+            err_msg = "SYNTAX_ERROR: Aggregate function (SUM, AVG, COUNT, MIN, MAX) used in SELECT list without mandatory 'group by' clause."
+            errors.append(err_msg)
+            structured_errors.append({"type": "SYNTAX_ERROR", "rule": "MISSING_GROUP_BY", "message": err_msg})
+
+        # 6. Associations must be declared BEFORE opening brace '{'
+        brace_idx = ddl_source.find("{")
+        if brace_idx > 0:
+            after_brace = ddl_source[brace_idx:]
+            if re.search(r"\bassociation\s*\[", after_brace, re.IGNORECASE):
+                err_msg = "SYNTAX_ERROR: Association declaration found inside '{ }'. All associations must be declared BEFORE the opening brace."
+                errors.append(err_msg)
+                structured_errors.append({"type": "SYNTAX_ERROR", "rule": "ASSOCIATION_INSIDE_BRACES", "message": err_msg})
+
+        return {"errors": errors, "structured_errors": structured_errors, "warnings": warnings}
+
