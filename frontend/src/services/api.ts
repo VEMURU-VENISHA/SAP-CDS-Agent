@@ -5,6 +5,7 @@ import {
   DataPreviewResult,
   TransportRequestItem,
   IncrementalSyncResult,
+  ExtractionStatusResult,
 } from '../types';
 
 const API_BASE = '/api/v1';
@@ -100,7 +101,9 @@ export async function runDiscovery(
   requiredFields: any[],
   searchMode: string = 'fast',
   useCache: boolean = true,
-  selectedDomains?: string[]
+  selectedDomains?: string[],
+  extractionEnabledOnly?: boolean,
+  requireDeltaSupport?: boolean
 ) {
   const res = await fetch(`${API_BASE}/discovery/run`, {
     method: 'POST',
@@ -111,11 +114,22 @@ export async function runDiscovery(
       search_mode: searchMode,
       use_cache: useCache,
       selected_domains: selectedDomains,
+      extraction_enabled_only: extractionEnabledOnly,
+      require_delta_support: requireDeltaSupport,
     }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err?.detail || 'Discovery failed');
+  }
+  return res.json();
+}
+
+export async function fetchExtractionStatus(viewName: string): Promise<ExtractionStatusResult> {
+  const res = await fetch(`${API_BASE}/discovery/extraction-status/${encodeURIComponent(viewName)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.detail || `Failed to fetch extraction status for ${viewName}`);
   }
   return res.json();
 }
@@ -305,9 +319,14 @@ export async function runIncrementalSync(prefixes?: string[], maxPerPrefix: numb
   return res.json();
 }
 
-export async function fetchTableLineage(tableName: string) {
+export async function fetchTableLineage(
+  tableName: string,
+  extractionEnabledOnly: boolean = false,
+  requireDeltaSupport: boolean = false
+) {
   const clean = tableName.trim();
-  const res = await fetch(`${API_BASE}/discovery/table-lineage?tables=${encodeURIComponent(clean)}`);
+  const query = `?tables=${encodeURIComponent(clean)}&extraction_enabled_only=${extractionEnabledOnly}&require_delta_support=${requireDeltaSupport}`;
+  const res = await fetch(`${API_BASE}/discovery/table-lineage${query}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err?.detail || `Failed to fetch lineage for table(s) ${tableName}`);

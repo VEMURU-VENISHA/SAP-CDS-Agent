@@ -133,6 +133,33 @@ export interface CDSCandidate {
   field_details?: CDSFieldMetadata[];
   association_details?: CDSAssociationMetadata[];
   annotation_details?: CDSAnnotationMetadata[];
+  // Authoritative SAP Data Extraction Metadata (I_DataExtractionEnabledView)
+  data_extraction_enabled?: boolean;
+  extraction_status?: 'VERIFIED_ENABLED' | 'VERIFIED_NOT_ENABLED' | 'UNVERIFIED' | string;
+  delta_cdc_supported?: boolean;
+  is_sap_released_view?: boolean;
+  extraction_details?: string;
+  component_extraction_statuses?: Record<string, string>;
+}
+
+export interface ExtractionFilteringStats {
+  filtered_single_count?: number;
+  filtered_multi_count?: number;
+  excluded_single_count?: number;
+  excluded_multi_count?: number;
+  require_delta_support?: boolean;
+  metadata_complete?: boolean;
+  error?: string;
+}
+
+export interface ExtractionStatusResult {
+  cds_name: string;
+  extraction_status: 'VERIFIED_ENABLED' | 'VERIFIED_NOT_ENABLED' | 'UNVERIFIED' | string;
+  data_extraction_enabled: boolean;
+  description?: string;
+  is_sap_released_view?: boolean;
+  delta_cdc_supported?: boolean;
+  error?: string;
 }
 
 export interface FieldMapping {

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight,
   Check,
+  CheckCircle,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -52,9 +53,18 @@ import {
   fetchDataPreview,
   fetchTransportRequests,
   runIncrementalSync,
-  fetchTableLineage
+  fetchTableLineage,
+  fetchExtractionStatus
 } from '../../services/api';
-import { HealthStatus, PipelineResult, DataPreviewResult, TransportRequestItem, IncrementalSyncResult } from '../../types';
+import {
+  HealthStatus,
+  PipelineResult,
+  DataPreviewResult,
+  TransportRequestItem,
+  IncrementalSyncResult,
+  ExtractionStatusResult,
+  ExtractionFilteringStats
+} from '../../types';
 
 interface Props {
   onPipelineExecuted?: (result: PipelineResult) => void;
@@ -151,6 +161,8 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
   const [tableLineageLoading, setTableLineageLoading] = useState(false);
   const [tableLineageError, setTableLineageError] = useState<string | null>(null);
   const [selectedLineageCategory, setSelectedLineageCategory] = useState<'ALL' | 'COMBINED' | 'SOURCES' | 'JOINS' | 'ASSOCIATIONS'>('ALL');
+  const [tableExtractionOnly, setTableExtractionOnly] = useState<boolean>(false);
+  const [tableDeltaOnly, setTableDeltaOnly] = useState<boolean>(false);
 
   // Step 2: Required Fields + Variants (HITL Gate 1 - Section 6)
   const [requiredFields, setRequiredFields] = useState<ExtractedField[]>([
@@ -186,6 +198,10 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
   const [discoveryStats, setDiscoveryStats] = useState<any>(null);
   const [discoveryProgressStep, setDiscoveryProgressStep] = useState<number>(0);
 
+  // Authoritative SAP Data Extraction Filtering (I_DataExtractionEnabledView)
+  const [extractionEnabledOnly, setExtractionEnabledOnly] = useState<boolean>(false);
+  const [requireDeltaSupport, setRequireDeltaSupport] = useState<boolean>(false);
+
   // Step 4: Recommendations (Sections 10-25 - ZERO CUTOFF)
   const [allCandidates, setAllCandidates] = useState<any[]>([]);
   const [candidateSearchQuery, setCandidateSearchQuery] = useState('');
@@ -196,6 +212,7 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
   const [fieldsFilter, setFieldsFilter] = useState('all');
   const [domainFilter, setDomainFilter] = useState('all');
   const [appCompFilter, setAppCompFilter] = useState('all');
+  const [extractionFilter, setExtractionFilter] = useState<'all' | 'enabled' | 'delta'>('all');
   const [expandedLowCoverage, setExpandedLowCoverage] = useState(false);
   const [whyThisModal, setWhyThisModal] = useState<any>(null);
   const [whyNotModal, setWhyNotModal] = useState<any>(null);
@@ -431,15 +448,21 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
   };
 
   // Step 1: Search by SAP Table Lineage Handler
-  const handleSearchTableLineage = async (tableNameOverride?: string) => {
+  const handleSearchTableLineage = async (
+    tableNameOverride?: string,
+    extractionOverride?: boolean,
+    deltaOverride?: boolean
+  ) => {
     const target = (tableNameOverride || tableSearchQuery).trim().toUpperCase();
     if (!target) return;
     setTableSearchQuery(target);
     setTableLineageLoading(true);
     setTableLineageError(null);
-    console.log(`[SAP Table Lineage] Initiating search for table: '${target}'`);
+    const isExt = extractionOverride !== undefined ? extractionOverride : tableExtractionOnly;
+    const isDelta = deltaOverride !== undefined ? deltaOverride : tableDeltaOnly;
+    console.log(`[SAP Table Lineage] Initiating search for table: '${target}' (extraction_only=${isExt}, delta=${isDelta})`);
     try {
-      const data = await fetchTableLineage(target);
+      const data = await fetchTableLineage(target, isExt, isDelta);
       console.log(`[SAP Table Lineage] Received ${data?.total_matches || 0} matches for table '${target}':`, data);
       setTableLineageResult(data);
     } catch (err: any) {
@@ -455,7 +478,31 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
     setRequirementText(
       `I need a CDS view for ${label || cdsName} based on ${cdsName} (SAP Table: ${tbl}) with relevant key dimensions and measures.`
     );
+    // Carry over extraction preference from table lineage to natural language discovery pipeline
+    if (tableExtractionOnly) {
+      setExtractionEnabledOnly(true);
+      setRequireDeltaSupport(tableDeltaOnly);
+    }
     setIntakeMode('NATURAL_LANGUAGE');
+  };
+
+  const toggleTableExtraction = () => {
+    const nextVal = !tableExtractionOnly;
+    setTableExtractionOnly(nextVal);
+    if (!nextVal) {
+      setTableDeltaOnly(false);
+    }
+    if (tableSearchQuery.trim()) {
+      handleSearchTableLineage(tableSearchQuery, nextVal, nextVal ? tableDeltaOnly : false);
+    }
+  };
+
+  const toggleTableDelta = () => {
+    const nextVal = !tableDeltaOnly;
+    setTableDeltaOnly(nextVal);
+    if (tableSearchQuery.trim()) {
+      handleSearchTableLineage(tableSearchQuery, tableExtractionOnly, nextVal);
+    }
   };
 
   // Step 2: Editing fields & variants (HITL Gate 1 - Section 6)
@@ -670,7 +717,7 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
   };
 
   // Step 2 -> Step 3 & 4: Start Discovery (Sections 7-10)
-  const handleStartDiscovery = async () => {
+  const handleStartDiscovery = async (overrideExtractionOnly?: boolean | React.MouseEvent) => {
     if (!authoritativeFields.length) {
       setGeneralError('Please check at least one required field before discovery.');
       return;
@@ -690,8 +737,18 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
     setTimeout(() => setDiscoveryProgressStep(4), 750);
     setTimeout(() => setDiscoveryProgressStep(5), 1000);
 
+    const isExtractionOnly = typeof overrideExtractionOnly === 'boolean' ? overrideExtractionOnly : extractionEnabledOnly;
+
     try {
-      const res = await runDiscovery(requirementText, authoritativeFields, searchMode, true, selectedDomains);
+      const res = await runDiscovery(
+        requirementText,
+        authoritativeFields,
+        searchMode,
+        true,
+        selectedDomains,
+        isExtractionOnly,
+        requireDeltaSupport
+      );
       if (searchCancelled) return;
 
       setDiscoveryProgressStep(6);
@@ -755,9 +812,16 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
         matchAppComp = (cand.application_component || '').toUpperCase().startsWith(appCompFilter.toUpperCase());
       }
 
-      return matchSearch && matchCoverage && matchType && matchJoin && matchOData && matchFields && matchDomain && matchAppComp;
+      let matchExtraction = true;
+      if (extractionFilter === 'enabled') {
+        matchExtraction = cand.data_extraction_enabled === true;
+      } else if (extractionFilter === 'delta') {
+        matchExtraction = cand.delta_cdc_supported === true;
+      }
+
+      return matchSearch && matchCoverage && matchType && matchJoin && matchOData && matchFields && matchDomain && matchAppComp && matchExtraction;
     });
-  }, [allCandidates, candidateSearchQuery, coverageFilter, typeFilter, joinFilter, odataFilter, fieldsFilter, domainFilter, appCompFilter]);
+  }, [allCandidates, candidateSearchQuery, coverageFilter, typeFilter, joinFilter, odataFilter, fieldsFilter, domainFilter, appCompFilter, extractionFilter]);
 
   // Grouped candidates (Section 11)
   const fullCoverageCandidates = useMemo(() => {
@@ -1198,6 +1262,40 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                 CDS Enabled
               </span>
+              {/* Authoritative SAP Data Extraction Badges */}
+              {cand.data_extraction_enabled ? (
+                <span
+                  className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-md border border-emerald-300 flex items-center gap-1 shadow-2xs"
+                  title={cand.extraction_details || "Verified in SAP I_DataExtractionEnabledView"}
+                >
+                  <CheckCircle className="w-3 h-3 text-emerald-600" />
+                  Extraction Enabled
+                </span>
+              ) : cand.extraction_status === 'VERIFIED_NOT_ENABLED' ? (
+                <span
+                  className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded border border-gray-200"
+                  title="Authoritatively confirmed not data extraction enabled in SAP I_DataExtractionEnabledView"
+                >
+                  Extraction: Disabled
+                </span>
+              ) : null}
+              {cand.delta_cdc_supported && (
+                <span
+                  className="text-[10px] bg-purple-100 text-purple-800 font-bold px-2 py-0.5 rounded-md border border-purple-300 flex items-center gap-1 shadow-2xs"
+                  title="Delta Change Data Capture (CDC) Supported in SAP"
+                >
+                  <Zap className="w-3 h-3 text-purple-600" />
+                  Delta CDC
+                </span>
+              )}
+              {cand.is_sap_released_view && (
+                <span
+                  className="text-[10px] bg-blue-50 text-blue-700 font-semibold px-2 py-0.5 rounded-md border border-blue-200"
+                  title="Released SAP CDS View"
+                >
+                  SAP Released
+                </span>
+              )}
               <span className="font-mono text-[10px] text-[#5F7187] bg-[#F4F8FC] border border-[#D9E4F0] px-1.5 py-0.5 rounded">
                 {candId}
               </span>
@@ -1694,6 +1792,55 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                 </div>
               </div>
 
+              {/* Data Extraction Capability Toggle (I_DataExtractionEnabledView) */}
+              <div className="p-4 bg-gradient-to-r from-emerald-50/70 via-[#F4F8FC] to-blue-50/40 border border-[#D9E4F0] rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+                <div className="flex items-start sm:items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+                    <Database className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-[#0F2747]">SAP Data Extraction Filtering</span>
+                      <span className="text-[10px] font-mono bg-white text-emerald-700 font-semibold px-2 py-0.5 rounded border border-emerald-300">
+                        I_DataExtractionEnabledView
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-[#5F7187] mt-0.5">
+                      When enabled, discovery strictly recommends CDS views verified as data extraction enabled in authoritative SAP metadata.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setExtractionEnabledOnly(!extractionEnabledOnly)}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-2xs ${
+                      extractionEnabledOnly
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-white border border-[#D9E4F0] text-[#5F7187] hover:text-[#0F2747]'
+                    }`}
+                  >
+                    <CheckCircle className={`w-3.5 h-3.5 ${extractionEnabledOnly ? 'text-white' : 'text-[#5F7187]'}`} />
+                    {extractionEnabledOnly ? 'Data Extraction: ACTIVE' : 'Data Extraction: OFF'}
+                  </button>
+                  {extractionEnabledOnly && (
+                    <button
+                      type="button"
+                      onClick={() => setRequireDeltaSupport(!requireDeltaSupport)}
+                      className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition border flex items-center gap-1 ${
+                        requireDeltaSupport
+                          ? 'bg-purple-600 text-white border-purple-600'
+                          : 'bg-white border-purple-200 text-purple-700 hover:bg-purple-50'
+                      }`}
+                      title="Require Delta Change Data Capture (CDC)"
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      Delta CDC
+                    </button>
+                  )}
+                </div>
+              </div>
+
               {/* Requirement Text */}
               <div>
                 <label className="text-xs font-bold text-[#0F2747]">Natural-Language Business Requirement</label>
@@ -1725,6 +1872,55 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
           {/* INTAKE MODE B: SEARCH BY SAP TABLE */}
           {intakeMode === 'SAP_TABLE' && (
             <div className="space-y-6">
+              {/* SAP Data Extraction Filtering Toggle for Table Lineage (Authoritative I_DataExtractionEnabledView) */}
+              <div className="p-3.5 bg-gradient-to-r from-emerald-50/70 via-white to-blue-50/50 border border-emerald-200/80 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-800 flex items-center justify-center shrink-0">
+                    <Database className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-[#0F2747]">SAP Data Extraction Filtering</span>
+                      <span className="text-[10px] font-mono bg-white text-emerald-700 font-semibold px-2 py-0.5 rounded border border-emerald-300">
+                        I_DataExtractionEnabledView
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-[#5F7187] mt-0.5">
+                      When enabled, table lineage strictly recommends CDS views verified as data extraction enabled in authoritative SAP metadata.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={toggleTableExtraction}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-2xs ${
+                      tableExtractionOnly
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-white border border-[#D9E4F0] text-[#5F7187] hover:text-[#0F2747]'
+                    }`}
+                  >
+                    <CheckCircle className={`w-3.5 h-3.5 ${tableExtractionOnly ? 'text-white' : 'text-[#5F7187]'}`} />
+                    {tableExtractionOnly ? 'Data Extraction: ACTIVE' : 'Data Extraction: OFF'}
+                  </button>
+                  {tableExtractionOnly && (
+                    <button
+                      type="button"
+                      onClick={toggleTableDelta}
+                      className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition border flex items-center gap-1 ${
+                        tableDeltaOnly
+                          ? 'bg-purple-600 text-white border-purple-600'
+                          : 'bg-white border-purple-200 text-purple-700 hover:bg-purple-50'
+                      }`}
+                      title="Require Delta Change Data Capture (CDC)"
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      Delta CDC
+                    </button>
+                  )}
+                </div>
+              </div>
+
               {/* Search Bar & Quick Pills */}
               <div className="space-y-3">
                 <div className="flex gap-2.5 max-w-2xl">
@@ -1831,6 +2027,22 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                             CDS Enabled (100% Enforced)
                           </span>
+                          {tableLineageResult.extraction_filtering?.filter_active && (
+                            <span className="inline-flex items-center gap-1 text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full border border-emerald-300 shadow-2xs">
+                              <CheckCircle className="w-3 h-3 text-emerald-600" />
+                              Extraction Enabled Only
+                              {tableLineageResult.extraction_filtering?.require_delta_support && (
+                                <span className="ml-1 text-[9px] bg-purple-100 text-purple-800 px-1 rounded font-bold">
+                                  + CDC
+                                </span>
+                              )}
+                            </span>
+                          )}
+                          {tableLineageResult.extraction_filtering?.excluded_total_count > 0 && (
+                            <span className="inline-flex items-center gap-1 text-[10px] bg-gray-100 text-gray-700 font-mono px-2 py-0.5 rounded-full border border-gray-300">
+                              Pruned: {tableLineageResult.extraction_filtering.excluded_total_count} non-extraction
+                            </span>
+                          )}
                           {tableLineageResult.query_time_ms !== undefined && (
                             <span className="inline-flex items-center gap-1 text-[10px] bg-blue-50 text-[#0A6ED1] font-mono font-bold px-2 py-0.5 rounded-full border border-blue-200">
                               ⚡ {tableLineageResult.query_time_ms}ms (86,298 views)
@@ -1916,6 +2128,52 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                     </div>
                   </div>
 
+                  {/* Authoritative Extraction Filter Active Banner for Table Lineage */}
+                  {tableLineageResult.extraction_filtering?.filter_active && (
+                    <div className="bg-emerald-50/80 border border-emerald-300 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-emerald-950 shadow-2xs">
+                      <div className="flex items-start sm:items-center gap-2.5">
+                        <div className="w-7 h-7 rounded-lg bg-emerald-200/80 text-emerald-800 flex items-center justify-center shrink-0">
+                          <CheckCircle className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold">Authoritative Data Extraction Mode Active</span>
+                            <span className="text-[10px] font-mono bg-white text-emerald-800 px-1.5 py-0.5 rounded border border-emerald-300 font-semibold">
+                              I_DataExtractionEnabledView
+                            </span>
+                            {tableLineageResult.extraction_filtering.require_delta_support && (
+                              <span className="text-[10px] font-mono bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded border border-purple-300 font-bold">
+                                Delta CDC Required
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-emerald-800/90 mt-0.5">
+                            Table lineage views are strictly filtered to CDS views confirmed data extraction enabled in SAP metadata. Non-extraction views were pruned.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 text-[11px] font-mono text-emerald-900 shrink-0">
+                        {tableLineageResult.extraction_filtering.excluded_total_count > 0 && (
+                          <span className="bg-white px-2.5 py-1 rounded-md border border-emerald-200 font-semibold shadow-2xs">
+                            Pruned: {tableLineageResult.extraction_filtering.excluded_total_count} views
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTableExtractionOnly(false);
+                            setTableDeltaOnly(false);
+                            handleSearchTableLineage(tableSearchQuery, false, false);
+                          }}
+                          className="px-2.5 py-1 rounded-md bg-white border border-emerald-300 hover:bg-emerald-100 text-emerald-800 font-bold transition flex items-center gap-1 shadow-2xs"
+                          title="Remove extraction filter and view all standard CDS lineage views"
+                        >
+                          <RefreshCw className="w-3 h-3" /> Turn Off Filter
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* MULTI-TABLE COMBINED VIEWS (Connecting ALL requested tables) */}
                   {tableLineageResult.is_multi_table && (selectedLineageCategory === 'ALL' || selectedLineageCategory === 'COMBINED') && (
                     <div className="space-y-3">
@@ -1950,6 +2208,40 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                                     CDS Enabled
                                   </span>
+                                  {/* Authoritative Extraction Badges */}
+                                  {cv.data_extraction_enabled ? (
+                                    <span
+                                      className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-md border border-emerald-300 flex items-center gap-1 shadow-2xs"
+                                      title={cv.extraction_details || "Verified in SAP I_DataExtractionEnabledView"}
+                                    >
+                                      <CheckCircle className="w-3 h-3 text-emerald-600" />
+                                      Extraction Enabled
+                                    </span>
+                                  ) : cv.extraction_status === 'VERIFIED_NOT_ENABLED' ? (
+                                    <span
+                                      className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded border border-gray-200"
+                                      title="Authoritatively confirmed not data extraction enabled in SAP I_DataExtractionEnabledView"
+                                    >
+                                      Extraction: Disabled
+                                    </span>
+                                  ) : null}
+                                  {cv.delta_cdc_supported && (
+                                    <span
+                                      className="text-[10px] bg-purple-100 text-purple-800 font-bold px-2 py-0.5 rounded-md border border-purple-300 flex items-center gap-1 shadow-2xs"
+                                      title="Delta Change Data Capture (CDC) Supported in SAP"
+                                    >
+                                      <Zap className="w-3 h-3 text-purple-600" />
+                                      Delta CDC
+                                    </span>
+                                  )}
+                                  {cv.is_sap_released_view && (
+                                    <span
+                                      className="text-[10px] bg-blue-50 text-blue-700 font-semibold px-2 py-0.5 rounded-md border border-blue-200"
+                                      title="Released SAP CDS View"
+                                    >
+                                      SAP Released
+                                    </span>
+                                  )}
                                   <span className="text-[10px] bg-[#E8F8F3] text-[#00A878] font-bold px-2 py-0.5 rounded-md border border-[#00A878]/30">
                                     COMBINED PROVENANCE
                                   </span>
@@ -2053,6 +2345,40 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                                     CDS Enabled
                                   </span>
+                                  {/* Authoritative Extraction Badges */}
+                                  {src.data_extraction_enabled ? (
+                                    <span
+                                      className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-md border border-emerald-300 flex items-center gap-1 shadow-2xs"
+                                      title={src.extraction_details || "Verified in SAP I_DataExtractionEnabledView"}
+                                    >
+                                      <CheckCircle className="w-3 h-3 text-emerald-600" />
+                                      Extraction Enabled
+                                    </span>
+                                  ) : src.extraction_status === 'VERIFIED_NOT_ENABLED' ? (
+                                    <span
+                                      className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded border border-gray-200"
+                                      title="Authoritatively confirmed not data extraction enabled in SAP I_DataExtractionEnabledView"
+                                    >
+                                      Extraction: Disabled
+                                    </span>
+                                  ) : null}
+                                  {src.delta_cdc_supported && (
+                                    <span
+                                      className="text-[10px] bg-purple-100 text-purple-800 font-bold px-2 py-0.5 rounded-md border border-purple-300 flex items-center gap-1 shadow-2xs"
+                                      title="Delta Change Data Capture (CDC) Supported in SAP"
+                                    >
+                                      <Zap className="w-3 h-3 text-purple-600" />
+                                      Delta CDC
+                                    </span>
+                                  )}
+                                  {src.is_sap_released_view && (
+                                    <span
+                                      className="text-[10px] bg-blue-50 text-blue-700 font-semibold px-2 py-0.5 rounded-md border border-blue-200"
+                                      title="Released SAP CDS View"
+                                    >
+                                      SAP Released
+                                    </span>
+                                  )}
                                   <span className="text-[10px] bg-[#E8F8F3] text-[#00A878] font-mono font-bold px-2 py-0.5 rounded-md border border-[#00A878]/30">
                                     as select from
                                   </span>
@@ -2158,6 +2484,40 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                                     CDS Enabled
                                   </span>
+                                  {/* Authoritative Extraction Badges */}
+                                  {j.data_extraction_enabled ? (
+                                    <span
+                                      className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-md border border-emerald-300 flex items-center gap-1 shadow-2xs"
+                                      title={j.extraction_details || "Verified in SAP I_DataExtractionEnabledView"}
+                                    >
+                                      <CheckCircle className="w-3 h-3 text-emerald-600" />
+                                      Extraction Enabled
+                                    </span>
+                                  ) : j.extraction_status === 'VERIFIED_NOT_ENABLED' ? (
+                                    <span
+                                      className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded border border-gray-200"
+                                      title="Authoritatively confirmed not data extraction enabled in SAP I_DataExtractionEnabledView"
+                                    >
+                                      Extraction: Disabled
+                                    </span>
+                                  ) : null}
+                                  {j.delta_cdc_supported && (
+                                    <span
+                                      className="text-[10px] bg-purple-100 text-purple-800 font-bold px-2 py-0.5 rounded-md border border-purple-300 flex items-center gap-1 shadow-2xs"
+                                      title="Delta Change Data Capture (CDC) Supported in SAP"
+                                    >
+                                      <Zap className="w-3 h-3 text-purple-600" />
+                                      Delta CDC
+                                    </span>
+                                  )}
+                                  {j.is_sap_released_view && (
+                                    <span
+                                      className="text-[10px] bg-blue-50 text-blue-700 font-semibold px-2 py-0.5 rounded-md border border-blue-200"
+                                      title="Released SAP CDS View"
+                                    >
+                                      SAP Released
+                                    </span>
+                                  )}
                                   <span className="text-[10px] bg-amber-50 text-amber-800 font-mono font-bold px-2 py-0.5 rounded-md border border-amber-300">
                                     join
                                   </span>
@@ -2247,6 +2607,40 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                                     CDS Enabled
                                   </span>
+                                  {/* Authoritative Extraction Badges */}
+                                  {a.data_extraction_enabled ? (
+                                    <span
+                                      className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-md border border-emerald-300 flex items-center gap-1 shadow-2xs"
+                                      title={a.extraction_details || "Verified in SAP I_DataExtractionEnabledView"}
+                                    >
+                                      <CheckCircle className="w-3 h-3 text-emerald-600" />
+                                      Extraction Enabled
+                                    </span>
+                                  ) : a.extraction_status === 'VERIFIED_NOT_ENABLED' ? (
+                                    <span
+                                      className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded border border-gray-200"
+                                      title="Authoritatively confirmed not data extraction enabled in SAP I_DataExtractionEnabledView"
+                                    >
+                                      Extraction: Disabled
+                                    </span>
+                                  ) : null}
+                                  {a.delta_cdc_supported && (
+                                    <span
+                                      className="text-[10px] bg-purple-100 text-purple-800 font-bold px-2 py-0.5 rounded-md border border-purple-300 flex items-center gap-1 shadow-2xs"
+                                      title="Delta Change Data Capture (CDC) Supported in SAP"
+                                    >
+                                      <Zap className="w-3 h-3 text-purple-600" />
+                                      Delta CDC
+                                    </span>
+                                  )}
+                                  {a.is_sap_released_view && (
+                                    <span
+                                      className="text-[10px] bg-blue-50 text-blue-700 font-semibold px-2 py-0.5 rounded-md border border-blue-200"
+                                      title="Released SAP CDS View"
+                                    >
+                                      SAP Released
+                                    </span>
+                                  )}
                                   <span className="text-[10px] bg-purple-50 text-purple-800 font-mono font-bold px-2 py-0.5 rounded-md border border-purple-300">
                                     association
                                   </span>
@@ -2570,6 +2964,40 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                   Deep Search
                 </button>
               </div>
+
+              {/* Data Extraction Toggle in Step 2 */}
+              <div className="flex items-center gap-2 border-l border-[#D9E4F0] pl-3">
+                <button
+                  type="button"
+                  onClick={() => setExtractionEnabledOnly(!extractionEnabledOnly)}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold border transition flex items-center gap-1.5 shadow-2xs ${
+                    extractionEnabledOnly
+                      ? 'bg-emerald-600 text-white border-emerald-600'
+                      : 'bg-white text-[#5F7187] border-[#D9E4F0] hover:text-[#0F2747]'
+                  }`}
+                  title="Filter strictly to CDS views verified in SAP authoritative view I_DataExtractionEnabledView"
+                >
+                  <CheckCircle className={`w-3.5 h-3.5 ${extractionEnabledOnly ? 'text-white' : 'text-[#5F7187]'}`} />
+                  Extraction Only {extractionEnabledOnly ? '(ON)' : '(OFF)'}
+                </button>
+
+                {extractionEnabledOnly && (
+                  <button
+                    type="button"
+                    onClick={() => setRequireDeltaSupport(!requireDeltaSupport)}
+                    className={`px-2 py-1 rounded text-xs font-semibold border transition flex items-center gap-1 ${
+                      requireDeltaSupport
+                        ? 'bg-purple-600 text-white border-purple-600 shadow-2xs'
+                        : 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100'
+                    }`}
+                    title="Require Delta Change Data Capture (CDC)"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    Delta CDC
+                  </button>
+                )}
+              </div>
+
               <button
                 onClick={handleStartDiscovery}
                 className="px-6 py-2.5 rounded-xl bg-[#1677FF] hover:bg-[#0A6ED1] text-white text-xs font-semibold flex items-center gap-2 shadow-xs"
@@ -2615,6 +3043,12 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
               {discoveryProgressStep >= 5 ? <CheckCircle2 className="w-4 h-4" /> : <span className="w-4 h-4 rounded-full border border-[#D9E4F0]" />}
               Relationship &amp; multi-CDS paths validated
             </div>
+            {extractionEnabledOnly && (
+              <div className={`flex items-center gap-2 ${discoveryProgressStep >= 5 ? 'text-[#00A878] font-medium' : 'text-[#5F7187]'}`}>
+                {discoveryProgressStep >= 5 ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <span className="w-4 h-4 rounded-full border border-[#D9E4F0]" />}
+                Authoritative SAP Data Extraction verified (I_DataExtractionEnabledView)
+              </div>
+            )}
             <div className={`flex items-center gap-2 ${discoveryProgressStep >= 6 ? 'text-[#00A878] font-medium' : 'text-[#5F7187]'}`}>
               {discoveryProgressStep >= 6 ? <CheckCircle2 className="w-4 h-4" /> : <span className="w-4 h-4 rounded-full border border-[#D9E4F0]" />}
               Recommendations ready
@@ -2700,6 +3134,50 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
             )}
           </div>
 
+          {/* Authoritative Extraction Filter Active Banner */}
+          {discoveryStats?.extraction_filtering?.filter_active && (
+            <div className="bg-emerald-50/80 border border-emerald-300 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-emerald-950 shadow-2xs">
+              <div className="flex items-start sm:items-center gap-2.5">
+                <div className="w-7 h-7 rounded-lg bg-emerald-200/80 text-emerald-800 flex items-center justify-center shrink-0">
+                  <CheckCircle className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold">Authoritative Data Extraction Mode Active</span>
+                    <span className="text-[10px] font-mono bg-white text-emerald-800 px-1.5 py-0.5 rounded border border-emerald-300 font-semibold">
+                      I_DataExtractionEnabledView
+                    </span>
+                    {discoveryStats.extraction_filtering.require_delta_support && (
+                      <span className="text-[10px] font-mono bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded border border-purple-300 font-bold">
+                        Delta CDC Required
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-emerald-800/90 mt-0.5">
+                    Recommendations are strictly filtered to CDS views confirmed data extraction enabled in SAP metadata. Non-extraction views were pruned before ranking.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 text-[11px] font-mono text-emerald-900 shrink-0">
+                <span className="bg-white px-2.5 py-1 rounded-md border border-emerald-200 font-semibold shadow-2xs">
+                  Pruned: {discoveryStats.extraction_filtering.excluded_single_count + discoveryStats.extraction_filtering.excluded_multi_count} views
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExtractionEnabledOnly(false);
+                    setRequireDeltaSupport(false);
+                    handleStartDiscovery(false);
+                  }}
+                  className="px-2.5 py-1 rounded-md bg-white border border-emerald-300 hover:bg-emerald-100 text-emerald-800 font-bold transition flex items-center gap-1 shadow-2xs"
+                  title="Remove extraction filter and recommend all standard CDS views"
+                >
+                  <RefreshCw className="w-3 h-3" /> Turn Off Filter
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Solution Decision Card (Section 2 & 10) */}
           {computedSolutionDecision && (
             <div
@@ -2761,6 +3239,21 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
               </div>
 
               <p className="text-xs text-[#5F7187] font-medium">{computedSolutionDecision.message}</p>
+
+              {computedSolutionDecision.solution_type === 'NO_SOLUTION' && discoveryStats?.extraction_filtering?.filter_active && (
+                <div className="pt-2 flex flex-wrap items-center gap-3">
+                  <button
+                    onClick={() => {
+                      setExtractionEnabledOnly(false);
+                      setRequireDeltaSupport(false);
+                      handleStartDiscovery(false);
+                    }}
+                    className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs transition"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> Re-run Discovery Without Extraction Filter
+                  </button>
+                </div>
+              )}
 
               {computedSolutionDecision.solution_type === 'REUSE_EXISTING' && (
                 <div className="flex flex-wrap items-center gap-4 text-xs font-mono pt-1 text-[#172B4D]">
@@ -2924,6 +3417,19 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                   <option value="PM">PM- (Plant Maint)</option>
                   <option value="PS">PS- (Project System)</option>
                   <option value="CA">CA- (Cross App)</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <span className="text-[#5F7187] text-[11px]">Extraction:</span>
+                <select
+                  value={extractionFilter}
+                  onChange={(e) => setExtractionFilter(e.target.value as any)}
+                  className="bg-white border border-[#D9E4F0] rounded-lg px-2.5 py-1 text-[#172B4D] outline-none font-medium text-xs"
+                >
+                  <option value="all">All Candidates</option>
+                  <option value="enabled">Extraction Enabled Only</option>
+                  <option value="delta">Delta CDC Supported</option>
                 </select>
               </div>
 
@@ -4026,6 +4532,24 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
                 ))}
               </div>
             </div>
+
+            {whyThisModal.data_extraction_enabled !== undefined && (
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs space-y-1">
+                <div className="font-bold text-emerald-900 flex items-center gap-1.5">
+                  <CheckCircle className="w-4 h-4 text-emerald-600" />
+                  SAP Extraction Status: {whyThisModal.extraction_status || (whyThisModal.data_extraction_enabled ? 'VERIFIED_ENABLED' : 'NOT_ENABLED')}
+                </div>
+                <div className="text-[11px] text-emerald-800">
+                  {whyThisModal.extraction_details || 'Verified in authoritative SAP view I_DataExtractionEnabledView.'}
+                </div>
+                {whyThisModal.delta_cdc_supported && (
+                  <div className="text-purple-800 font-semibold text-[11px] flex items-center gap-1 pt-0.5">
+                    <Zap className="w-3.5 h-3.5 text-purple-600" />
+                    Delta Change Data Capture (CDC) Supported
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -4044,6 +4568,15 @@ export const RecentPipelines: React.FC<Props> = ({ onPipelineExecuted, onDecisio
               </button>
             </div>
             <p className="text-xs text-[#172B4D] leading-relaxed">{whyNotModal.why_not}</p>
+            {whyNotModal.extraction_details && (
+              <div className="text-xs text-amber-900 bg-amber-50 border border-amber-200 p-3 rounded-xl space-y-1">
+                <div className="font-bold flex items-center gap-1 text-amber-800">
+                  <AlertCircle className="w-3.5 h-3.5 text-amber-700" />
+                  SAP Extraction Eligibility:
+                </div>
+                <p className="text-[11px] text-amber-800">{whyNotModal.extraction_details}</p>
+              </div>
+            )}
             {whyNotModal.missing_fields?.length > 0 && (
               <div className="text-xs text-red-700 bg-red-50 border border-red-200 p-3 rounded-xl">
                 <div className="font-bold mb-1">Missing Business Fields:</div>

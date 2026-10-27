@@ -59,6 +59,8 @@ class DiscoveryRunPayload(BaseModel):
     search_mode: str = "fast"
     use_cache: bool = True
     selected_domains: Optional[List[str]] = None
+    extraction_enabled_only: Optional[bool] = None
+    require_delta_support: Optional[bool] = None
 
 
 @router.get("/metadata-status", summary="Gets real metadata index status and connection stats")
@@ -115,7 +117,38 @@ async def run_discovery_pipeline(payload: DiscoveryRunPayload):
         search_mode=payload.search_mode,
         use_cache=payload.use_cache,
         selected_domains=payload.selected_domains,
+        extraction_enabled_only=payload.extraction_enabled_only,
+        require_delta_support=payload.require_delta_support,
     )
+
+
+@router.get("/extraction-status/{view_name}", summary="Checks authoritative data extraction enabled status for a CDS view")
+async def get_view_extraction_status(view_name: str):
+    """Returns authoritative data extraction metadata from I_DataExtractionEnabledView for target CDS view."""
+    meta = await discovery_svc.get_authoritative_extraction_metadata()
+    if not meta.get("success"):
+        return {
+            "cds_name": view_name,
+            "extraction_status": "UNVERIFIED",
+            "data_extraction_enabled": False,
+            "error": meta.get("error"),
+        }
+    rec = meta.get("records", {}).get(view_name.strip().upper())
+    if rec:
+        return {
+            "cds_name": view_name,
+            "extraction_status": "VERIFIED_ENABLED",
+            "data_extraction_enabled": True,
+            "description": rec.get("description"),
+            "is_sap_released_view": rec.get("is_sap_released"),
+            "delta_cdc_supported": rec.get("delta_cdc_supported"),
+        }
+    return {
+        "cds_name": view_name,
+        "extraction_status": "VERIFIED_NOT_ENABLED" if meta.get("is_complete") else "UNVERIFIED",
+        "data_extraction_enabled": False,
+    }
+
 
 
 class IncrementalSyncPayload(BaseModel):
@@ -140,12 +173,20 @@ async def sync_incremental_endpoint(payload: Optional[IncrementalSyncPayload] = 
 
 
 @router.get("/table-lineage", summary="Discovers CDS views that consume one or multiple SAP tables as source, join, or association")
-async def get_table_lineage_query(tables: str = Query(..., description="SAP transparent table name(s), comma, space, or 'and' separated")):
+async def get_table_lineage_query(
+    tables: str = Query(..., description="SAP transparent table name(s), comma, space, or 'and' separated"),
+    extraction_enabled_only: bool = Query(False, description="Filter strictly to views confirmed in I_DataExtractionEnabledView"),
+    require_delta_support: bool = Query(False, description="Require Delta Change Data Capture support"),
+):
     """Returns CDS views consuming the specified SAP table(s) as primary source, join, or association."""
     tbl_clean = tables.strip()
-    print(f"\n>>> [SAP-CDS-AGENT] Table Lineage Query Received: '{tbl_clean}' <<<", flush=True)
-    logger.info(f"[TableLineage] Searching CDS views for transparent table(s): {tbl_clean}")
-    result = await discovery_svc.get_table_lineage(tbl_clean)
+    print(f"\n>>> [SAP-CDS-AGENT] Table Lineage Query Received: '{tbl_clean}' (extraction_only={extraction_enabled_only}, delta={require_delta_support}) <<<", flush=True)
+    logger.info(f"[TableLineage] Searching CDS views for transparent table(s): {tbl_clean} (extraction_only={extraction_enabled_only}, delta={require_delta_support})")
+    result = await discovery_svc.get_table_lineage(
+        tbl_clean,
+        extraction_enabled_only=extraction_enabled_only,
+        require_delta_support=require_delta_support,
+    )
     total = result.get("total_matches", 0)
     comb_cnt = result.get("total_combined_matches", 0)
     print(
@@ -157,12 +198,20 @@ async def get_table_lineage_query(tables: str = Query(..., description="SAP tran
 
 
 @router.get("/table-lineage/{table_name:path}", summary="Discovers all CDS views that take a transparent SAP table as source, join, or association")
-async def get_table_lineage_endpoint(table_name: str):
+async def get_table_lineage_endpoint(
+    table_name: str,
+    extraction_enabled_only: bool = Query(False, description="Filter strictly to views confirmed in I_DataExtractionEnabledView"),
+    require_delta_support: bool = Query(False, description="Require Delta Change Data Capture support"),
+):
     """Returns all CDS views that consume the specified SAP table as primary source, join, or association."""
     tbl = table_name.strip()
-    print(f"\n>>> [SAP-CDS-AGENT] Table Lineage Path Received: '{tbl}' <<<", flush=True)
-    logger.info(f"[TableLineage] Searching CDS views for transparent table(s): {tbl}")
-    result = await discovery_svc.get_table_lineage(tbl)
+    print(f"\n>>> [SAP-CDS-AGENT] Table Lineage Path Received: '{tbl}' (extraction_only={extraction_enabled_only}, delta={require_delta_support}) <<<", flush=True)
+    logger.info(f"[TableLineage] Searching CDS views for transparent table(s): {tbl} (extraction_only={extraction_enabled_only}, delta={require_delta_support})")
+    result = await discovery_svc.get_table_lineage(
+        tbl,
+        extraction_enabled_only=extraction_enabled_only,
+        require_delta_support=require_delta_support,
+    )
     total = result.get("total_matches", 0)
     comb_cnt = result.get("total_combined_matches", 0)
     print(

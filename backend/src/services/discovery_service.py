@@ -20,6 +20,7 @@ from src.config import get_settings
 from src.logging_config import logger
 from src.sap.adt_client import SAPADTClient
 from src.sap.adt_connector import SAPADTConnector
+from src.sap.connector import get_sap_connector
 from src.services.normalizer import (
     canonicalize,
     get_synonym_cluster,
@@ -46,6 +47,9 @@ class CDSDiscoveryService:
         # In-memory relationship graph and graph metadata (Sections 15-17 & Section 19)
         self._relationship_graph: Optional[Dict[str, List[Dict[str, Any]]]] = None
         self._graph_metadata: Dict[str, Any] = {}
+        # Authoritative Data Extraction Cache (I_DataExtractionEnabledView)
+        self._extraction_metadata_cache: Optional[Dict[str, Any]] = None
+        self._extraction_cache_timestamp: float = 0.0
 
     def _get_db(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
@@ -543,8 +547,14 @@ class CDSDiscoveryService:
 
         return results
 
-    async def get_table_lineage(self, table_name: Any) -> Dict[str, Any]:
-        """Discovers all CDS views that take one or multiple transparent SAP tables as source, join, or association, enforcing CDS-enabled validation."""
+    async def get_table_lineage(
+        self,
+        table_name: Any,
+        extraction_enabled_only: bool = False,
+        require_delta_support: bool = False,
+        sap_client: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Discovers all CDS views that take one or multiple transparent SAP tables as source, join, or association, enforcing CDS-enabled and authoritative data extraction validation."""
         start_time = time.time()
         if isinstance(table_name, (list, tuple, set)):
             clean_input = ", ".join([str(t).strip() for t in table_name if str(t).strip()])
@@ -561,8 +571,59 @@ class CDSDiscoveryService:
                 "total_matches": 0,
                 "is_multi_table": False,
                 "cds_enabled_enforced": True,
+                "extraction_filtering": {
+                    "filter_active": extraction_enabled_only,
+                    "require_delta_support": require_delta_support,
+                },
                 "query_time_ms": 0.0,
             }
+
+        # Fetch authoritative extraction metadata from I_DataExtractionEnabledView
+        extraction_metadata = await self.get_authoritative_extraction_metadata(sap_client=sap_client)
+        ext_records = extraction_metadata.get("records", {})
+        ext_complete = extraction_metadata.get("is_complete", False)
+
+        def _annotate_and_filter_views(items: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+            annotated = []
+            excluded_count = 0
+            for item in items:
+                vname = item.get("cds_name", "")
+                rec = ext_records.get(vname.strip().upper())
+                is_enabled = False
+                delta_sup = False
+                sap_rel = False
+
+                if rec:
+                    delta_sup = bool(rec.get("delta_cdc_supported"))
+                    sap_rel = bool(rec.get("is_sap_released"))
+                    if require_delta_support:
+                        is_enabled = delta_sup
+                    else:
+                        is_enabled = True
+                    status = "VERIFIED_ENABLED" if is_enabled else ("VERIFIED_NOT_ENABLED" if not delta_sup and require_delta_support else "VERIFIED_ENABLED")
+                else:
+                    status = "VERIFIED_NOT_ENABLED" if ext_complete else "UNVERIFIED"
+
+                item["data_extraction_enabled"] = is_enabled
+                item["extraction_status"] = status
+                item["delta_cdc_supported"] = delta_sup
+                item["is_sap_released_view"] = sap_rel
+                item["extraction_details"] = (
+                    f"Verified in SAP I_DataExtractionEnabledView"
+                    + (" with Delta CDC" if delta_sup else "")
+                    if rec
+                    else "Not confirmed in SAP I_DataExtractionEnabledView"
+                )
+
+                if extraction_enabled_only:
+                    if is_enabled:
+                        annotated.append(item)
+                    else:
+                        excluded_count += 1
+                else:
+                    annotated.append(item)
+
+            return annotated, excluded_count
 
         # Parse table tokens (handles commas, spaces, semicolons, and 'and')
         raw_tokens = re.sub(r"\band\b", " ", clean_input, flags=re.IGNORECASE)
@@ -733,7 +794,16 @@ class CDSDiscoveryService:
                             "cds_status": "CDS Enabled (View Entity)",
                         })
 
+                # Apply extraction annotation and filtering
+                sources, exc_src = _annotate_and_filter_views(sources)
+                joins, exc_jn = _annotate_and_filter_views(joins)
+                assocs, exc_asc = _annotate_and_filter_views(assocs)
+
+                source_names = {s["cds_name"].upper() for s in sources}
+                join_names = {j["cds_name"].upper() for j in joins}
+                assoc_names = {a["cds_name"].upper() for a in assocs}
                 all_connected = source_names | join_names | assoc_names
+
                 return {
                     "table_name": tbl,
                     "description": desc,
@@ -743,6 +813,11 @@ class CDSDiscoveryService:
                     "associations": assocs,
                     "connected_set": all_connected,
                     "cds_enabled": True,
+                    "excluded_counts": {
+                        "sources": exc_src,
+                        "joins": exc_jn,
+                        "associations": exc_asc,
+                    },
                 }
 
             # -------------------------------------------------------------
@@ -751,12 +826,25 @@ class CDSDiscoveryService:
             if len(tokens) <= 1:
                 single_tbl = tokens[0] if tokens else clean_input.upper()
                 res = _query_single_table(single_tbl)
+                exc = res.pop("excluded_counts", {})
                 del res["connected_set"]
                 res["is_multi_table"] = False
                 res["requested_tables"] = [single_tbl]
                 res["combined_views"] = []
                 res["total_combined_matches"] = 0
                 res["cds_enabled_enforced"] = True
+                res["extraction_filtering"] = {
+                    "filter_active": extraction_enabled_only,
+                    "require_delta_support": require_delta_support,
+                    "metadata_source": "I_DataExtractionEnabledView (ADT freestyle preview)",
+                    "metadata_complete": ext_complete,
+                    "total_extraction_records_in_sap": len(ext_records),
+                    "excluded_sources_count": exc.get("sources", 0),
+                    "excluded_joins_count": exc.get("joins", 0),
+                    "excluded_associations_count": exc.get("associations", 0),
+                    "total_excluded": sum(exc.values()),
+                    "excluded_total_count": sum(exc.values()),
+                }
                 res["total_cds_views_checked"] = 86298
                 res["query_time_ms"] = round((time.time() - start_time) * 1000, 1)
                 return res
@@ -814,14 +902,23 @@ class CDSDiscoveryService:
                     "clause_summary": summary,
                 })
 
+            combined_views, exc_comb = _annotate_and_filter_views(combined_views)
+
             # Cleanup sets and prepare response
             all_sources = []
             all_joins = []
             all_assocs = []
+            tot_exc_src = 0
+            tot_exc_jn = 0
+            tot_exc_asc = 0
             for tbl, data in table_results.items():
                 all_sources.extend(data["sources"][:25])
                 all_joins.extend(data["joins"][:25])
                 all_assocs.extend(data["associations"][:25])
+                exc = data.pop("excluded_counts", {})
+                tot_exc_src += exc.get("sources", 0)
+                tot_exc_jn += exc.get("joins", 0)
+                tot_exc_asc += exc.get("associations", 0)
                 del data["connected_set"]
 
             elapsed_ms = round((time.time() - start_time) * 1000, 1)
@@ -838,6 +935,19 @@ class CDSDiscoveryService:
                 "joins": all_joins,
                 "associations": all_assocs,
                 "cds_enabled_enforced": True,
+                "extraction_filtering": {
+                    "filter_active": extraction_enabled_only,
+                    "require_delta_support": require_delta_support,
+                    "metadata_source": "I_DataExtractionEnabledView (ADT freestyle preview)",
+                    "metadata_complete": ext_complete,
+                    "total_extraction_records_in_sap": len(ext_records),
+                    "excluded_combined_count": exc_comb,
+                    "excluded_sources_count": tot_exc_src,
+                    "excluded_joins_count": tot_exc_jn,
+                    "excluded_associations_count": tot_exc_asc,
+                    "total_excluded": exc_comb + tot_exc_src + tot_exc_jn + tot_exc_asc,
+                    "excluded_total_count": exc_comb + tot_exc_src + tot_exc_jn + tot_exc_asc,
+                },
                 "total_cds_views_checked": 86298,
                 "query_time_ms": elapsed_ms,
             }
@@ -1712,6 +1822,9 @@ class CDSDiscoveryService:
         search_mode: str = "fast",
         use_cache: bool = True,
         selected_domains: Optional[List[str]] = None,
+        extraction_enabled_only: Optional[bool] = None,
+        require_delta_support: Optional[bool] = None,
+        sap_client: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Executes complete, two-stage un-truncated CDS discovery and validation.
         
@@ -1722,6 +1835,22 @@ class CDSDiscoveryService:
         - Low Coverage (<40%)
         """
         start_time = time.time()
+
+        # Determine whether extraction-enabled filtering is explicitly requested
+        if extraction_enabled_only is not None:
+            filter_extraction = bool(extraction_enabled_only)
+        else:
+            filter_extraction = bool(
+                re.search(r"\b(extraction[\s_-]*enabled|data[\s_-]*extraction|enable[d]?\s+for\s+extraction|extractable)\b", requirement_text, re.IGNORECASE)
+            )
+
+        # Determine whether delta change data capture (CDC) is specifically required
+        if require_delta_support is not None:
+            filter_delta = bool(require_delta_support)
+        else:
+            filter_delta = bool(
+                re.search(r"\b(delta|cdc|change[\s_-]*data[\s_-]*capture)\b", requirement_text, re.IGNORECASE)
+            )
 
         # Build normalized field specifications with semantic classification & underlying concepts
         field_specs = []
@@ -1770,6 +1899,8 @@ class CDSDiscoveryService:
             "fields": sorted([f["name"] + ":" + ",".join(f["variants"]) for f in field_specs]),
             "mode": search_mode,
             "domains": sorted(selected_domains or []),
+            "extraction_enabled": filter_extraction,
+            "delta_support": filter_delta,
         }
         cache_key = hashlib.sha256(json.dumps(cache_key_data, sort_keys=True).encode("utf-8")).hexdigest()
         if use_cache and cache_key in self._search_cache:
@@ -2143,6 +2274,117 @@ class CDSDiscoveryService:
                             if new_depth == 1:
                                 queue.append((nbr_up, new_path_views, new_path_edges, curr_matched))
 
+        # Apply Authoritative Data Extraction Filtering from I_DataExtractionEnabledView
+        extraction_stats = {
+            "requested": filter_extraction,
+            "require_delta": filter_delta,
+            "metadata_status": "NOT_REQUESTED",
+            "excluded_single_count": 0,
+            "excluded_multi_count": 0,
+            "total_extraction_views_known": 0,
+        }
+
+        if filter_extraction:
+            extraction_meta = await self.get_authoritative_extraction_metadata(sap_client=sap_client)
+            ext_success = extraction_meta.get("success", False)
+            ext_complete = extraction_meta.get("is_complete", False)
+            ext_records = extraction_meta.get("records", {})
+            ext_error = extraction_meta.get("error")
+
+            extraction_stats["total_extraction_views_known"] = len(ext_records)
+
+            if not ext_success:
+                # Metadata retrieval failed: Under Clean Core rules, never treat UNVERIFIED as enabled!
+                extraction_stats["metadata_status"] = "FAILED"
+                extraction_stats["error"] = ext_error
+                logger.warning(f"[CDSDiscoveryService] Data extraction metadata retrieval failed: {ext_error}")
+
+                # Mark all candidates as UNVERIFIED and exclude them
+                for cand in single_cds_results:
+                    cand["extraction_status"] = "UNVERIFIED"
+                    cand["data_extraction_enabled"] = False
+                    cand["extraction_details"] = f"Extraction status unverified: {ext_error}"
+                for cand in multi_cds_candidates:
+                    cand["extraction_status"] = "UNVERIFIED"
+                    cand["data_extraction_enabled"] = False
+                    cand["extraction_details"] = f"Extraction status unverified: {ext_error}"
+
+                extraction_stats["excluded_single_count"] = len(single_cds_results)
+                extraction_stats["excluded_multi_count"] = len(multi_cds_candidates)
+                single_cds_results = []
+                multi_cds_candidates = []
+                all_candidates = []
+            else:
+                extraction_stats["metadata_status"] = "COMPLETE" if ext_complete else "INCOMPLETE"
+
+                # Filter Single CDS candidates
+                filtered_single = []
+                for cand in single_cds_results:
+                    cand_name_up = cand["cds_name"].strip().upper()
+                    if cand_name_up in ext_records:
+                        rec = ext_records[cand_name_up]
+                        if filter_delta and not rec.get("delta_cdc_supported"):
+                            cand["extraction_status"] = "VERIFIED_NOT_ENABLED"
+                            cand["data_extraction_enabled"] = False
+                            cand["delta_cdc_supported"] = False
+                            cand["is_sap_released_view"] = rec.get("is_sap_released", False)
+                            cand["extraction_details"] = "Excluded: CDS view is enabled for general extraction, but does not support delta change data capture (CDC)."
+                            extraction_stats["excluded_single_count"] += 1
+                        else:
+                            cand["extraction_status"] = "VERIFIED_ENABLED"
+                            cand["data_extraction_enabled"] = True
+                            cand["cds_name"] = rec.get("view_name", cand["cds_name"])
+                            cand["delta_cdc_supported"] = rec.get("delta_cdc_supported", False)
+                            cand["is_sap_released_view"] = rec.get("is_sap_released", False)
+                            cand["extraction_description"] = rec.get("description", "")
+                            cand["extraction_details"] = f"Verified in I_DataExtractionEnabledView: {rec.get('description', '')} (Delta CDC: {'Yes' if rec.get('delta_cdc_supported') else 'No'}, SAP Released: {'Yes' if rec.get('is_sap_released') else 'No'})"
+                            filtered_single.append(cand)
+                    else:
+                        if ext_complete:
+                            cand["extraction_status"] = "VERIFIED_NOT_ENABLED"
+                            cand["data_extraction_enabled"] = False
+                            cand["extraction_details"] = "Excluded: View is not listed in authoritative I_DataExtractionEnabledView catalog."
+                        else:
+                            cand["extraction_status"] = "UNVERIFIED"
+                            cand["data_extraction_enabled"] = False
+                            cand["extraction_details"] = "Unverified: Authoritative metadata query was incomplete; cannot conclude extraction status."
+                        extraction_stats["excluded_single_count"] += 1
+
+                # Filter Multi-CDS candidates (every component view must be VERIFIED_ENABLED)
+                filtered_multi = []
+                for cand in multi_cds_candidates:
+                    component_views = cand.get("views") or [v.strip() for v in cand["cds_name"].split("+")]
+                    all_comp_enabled = True
+                    comp_details = {}
+                    for comp in component_views:
+                        comp_up = comp.strip().upper()
+                        if comp_up in ext_records:
+                            rec = ext_records[comp_up]
+                            if filter_delta and not rec.get("delta_cdc_supported"):
+                                all_comp_enabled = False
+                                comp_details[comp] = "VERIFIED_NOT_ENABLED (Missing Delta CDC)"
+                            else:
+                                comp_details[comp] = "VERIFIED_ENABLED"
+                        else:
+                            all_comp_enabled = False
+                            comp_details[comp] = "VERIFIED_NOT_ENABLED" if ext_complete else "UNVERIFIED"
+
+                    cand["component_extraction_statuses"] = comp_details
+                    if all_comp_enabled:
+                        cand["extraction_status"] = "VERIFIED_ENABLED"
+                        cand["data_extraction_enabled"] = True
+                        cand["extraction_details"] = "All component CDS views verified as extraction-enabled in I_DataExtractionEnabledView."
+                        filtered_multi.append(cand)
+                    else:
+                        cand["extraction_status"] = "VERIFIED_NOT_ENABLED" if ext_complete else "UNVERIFIED"
+                        cand["data_extraction_enabled"] = False
+                        cand["extraction_details"] = f"Excluded: Component view(s) not verified as extraction-enabled: {comp_details}"
+                        extraction_stats["excluded_multi_count"] += 1
+
+                single_cds_results = filtered_single
+                multi_cds_candidates = filtered_multi
+                all_candidates = single_cds_results + multi_cds_candidates
+
         # Presentation sort: Rank by coverage descending, then domain match, then single CDS
         all_candidates.sort(key=lambda x: (x["coverage_pct"], 1 if x.get("domain_match") else 0, x["type"] == "Single CDS"), reverse=True)
 
@@ -2188,7 +2430,11 @@ class CDSDiscoveryService:
                     "cds": [],
                     "coverage": 0.0,
                     "missing_fields": [f.get("name", str(f)) if isinstance(f, dict) else str(f) for f in field_specs],
-                    "message": "No single CDS gives full coverage and no valid multi-CDS relationship can provide missing fields.",
+                    "message": (
+                        f"Extraction-enabled CDS discovery found no eligible solution. Authoritative metadata from I_DataExtractionEnabledView excluded non-extraction views. {extraction_stats.get('error') or ''}".strip()
+                        if filter_extraction
+                        else "No single CDS gives full coverage and no valid multi-CDS relationship can provide missing fields."
+                    ),
                     "requires_create": False,
                     "do_not_create": True,
                 }
@@ -2229,6 +2475,7 @@ class CDSDiscoveryService:
                 "join_paths_checked": join_paths_evaluated,
                 "metadata_source": "ADT",
                 "from_cache": False,
+                "extraction_filtering": extraction_stats,
             },
             "candidates": all_candidates,
             "single_cds_candidates": single_cds_results,
@@ -2342,6 +2589,52 @@ class CDSDiscoveryService:
             return await client.get_transport_requests()
         finally:
             await client.aclose()
+
+    async def get_authoritative_extraction_metadata(
+        self,
+        candidate_names: Optional[List[str]] = None,
+        force_refresh: bool = False,
+        sap_client: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Retrieves authoritative data extraction enabled metadata records from I_DataExtractionEnabledView.
+
+        Uses the verified read-only SAP ADT freestyle data preview interface.
+        Results are cached in-memory with a 1-hour TTL for high-performance discovery.
+        """
+        now = time.time()
+        if not force_refresh and self._extraction_metadata_cache is not None:
+            if (now - self._extraction_cache_timestamp) < 3600:
+                if self._extraction_metadata_cache.get("is_complete"):
+                    return self._extraction_metadata_cache
+
+        try:
+            if sap_client is not None:
+                result = await sap_client.get_extraction_metadata_records(
+                    view_names=candidate_names,
+                    max_records=10000,
+                )
+            else:
+                connector = get_sap_connector(self.settings)
+                result = await connector.get_extraction_metadata_records(
+                    view_names=candidate_names,
+                    max_records=10000,
+                )
+
+            if result.get("success") and result.get("is_complete"):
+                self._extraction_metadata_cache = result
+                self._extraction_cache_timestamp = now
+
+            return result
+        except Exception as e:
+            logger.error(f"[CDSDiscoveryService] Failed to retrieve extraction metadata: {e}")
+            return {
+                "success": False,
+                "is_complete": False,
+                "total_rows_in_sap": 0,
+                "records_count": 0,
+                "records": {},
+                "error": str(e),
+            }
 
     async def sync_incremental(
         self,

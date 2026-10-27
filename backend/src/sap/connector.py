@@ -150,6 +150,22 @@ class UnconnectedSAPConnector(ISAPConnector):
         logger.warning("SAP checkrun_cds_in_sap invoked while connector is unconnected")
         raise SAPNotConnectedError("checkrun_cds_in_sap")
 
+    async def get_extraction_metadata_records(
+        self,
+        view_names: Optional[List[str]] = None,
+        max_records: int = 10000,
+    ) -> dict:
+        """Returns unverified extraction status when SAP connector is unconnected."""
+        logger.warning("SAP get_extraction_metadata_records invoked while connector is unconnected")
+        return {
+            "success": False,
+            "is_complete": False,
+            "total_rows_in_sap": 0,
+            "records_count": 0,
+            "records": {},
+            "error": "SAP connector is in unconnected stub mode. Live SAP connection required for authoritative data extraction metadata.",
+        }
+
 
 
 _connector_instance: Optional[ISAPConnector] = None

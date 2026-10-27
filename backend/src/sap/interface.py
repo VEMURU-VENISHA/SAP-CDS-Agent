@@ -162,4 +162,19 @@ class ISAPConnector(ABC):
         """Retrieves active CTS workbench transport requests from SAP S/4HANA."""
         return []
 
+    async def get_extraction_metadata_records(
+        self,
+        view_names: Optional[List[str]] = None,
+        max_records: int = 10000,
+    ) -> dict:
+        """Retrieves authoritative data extraction enabled metadata records from I_DataExtractionEnabledView."""
+        return {
+            "success": False,
+            "is_complete": False,
+            "total_rows_in_sap": 0,
+            "records_count": 0,
+            "records": {},
+            "error": "Not implemented",
+        }
+
 

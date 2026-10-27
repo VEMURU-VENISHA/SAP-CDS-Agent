@@ -104,10 +104,12 @@ class SAPADTClient:
             elif "reporters=abapCheckRun" in clean_path:
                 has_checkrun_reporter = True
 
-            if not (is_checkrun and has_checkrun_reporter):
+            is_datapreview = clean_path.startswith("/sap/bc/adt/datapreview/freestyle")
+
+            if not ((is_checkrun and has_checkrun_reporter) or is_datapreview):
                 raise SAPSecurityError(
                     f"Pre-socket security guard blocked unauthorized POST to: '{clean_path}'. "
-                    "Only POST /sap/bc/adt/checkruns?reporters=abapCheckRun is permitted."
+                    "Only POST /sap/bc/adt/checkruns?reporters=abapCheckRun and read-only POST /sap/bc/adt/datapreview/freestyle are permitted."
                 )
 
         else:
@@ -1716,6 +1718,142 @@ class SAPADTClient:
                 message=f"SAP data preview failed with HTTP {resp.status_code}: {resp.text[:200]}",
                 status_code=resp.status_code,
             )
+
+    async def get_extraction_metadata_records(
+        self,
+        view_names: Optional[List[str]] = None,
+        max_records: int = 10000,
+    ) -> Dict[str, Any]:
+        """Retrieves authoritative data extraction enabled metadata records from I_DataExtractionEnabledView.
+
+        Uses the verified read-only ADT freestyle data preview interface:
+        POST /sap/bc/adt/datapreview/freestyle?rowNumber={max_records}
+        Content-Type: application/sql
+
+        Query:
+            SELECT DataExtractionViewName, DataExtractionViewDescription, IsSAPReleasedView, DeltaChgDataCaptureIsSupported
+            FROM I_DataExtractionEnabledView
+
+        Returns:
+            Dict containing:
+                - success (bool): True if records were retrieved and parsed.
+                - is_complete (bool): True if query returned full set matching or exceeding totalRows in SAP.
+                - total_rows_in_sap (int): Total rows reported by the SAP system.
+                - records_count (int): Number of records returned.
+                - records (Dict[str, Dict[str, Any]]): Map of UPPERCASE view name to record attributes:
+                    - view_name (str): Original CDS view name
+                    - description (str): Data extraction view description
+                    - is_sap_released (bool): True if IsSAPReleasedView == 'X'
+                    - delta_cdc_supported (bool): True if DeltaChgDataCaptureIsSupported == 'X'
+                    - extraction_status (str): 'VERIFIED_ENABLED'
+                - error (Optional[str]): Error message if metadata retrieval failed.
+        """
+        path = f"/sap/bc/adt/datapreview/freestyle?rowNumber={max(1, max_records)}"
+        self._assert_zero_write_policy("POST", path)
+
+        fields_clause = "DataExtractionViewName, DataExtractionViewDescription, IsSAPReleasedView, DeltaChgDataCaptureIsSupported"
+        if view_names:
+            clean_names = [v.strip() for v in view_names if v and v.strip()]
+            valid_names = [v for v in clean_names if re.match(r"^[A-Z0-9_\/]+$", v, re.IGNORECASE)]
+            if valid_names:
+                in_list = ", ".join(f"'{v}'" for v in valid_names)
+                query = f"SELECT {fields_clause} FROM I_DataExtractionEnabledView WHERE DataExtractionViewName IN ({in_list})"
+            else:
+                query = f"SELECT {fields_clause} FROM I_DataExtractionEnabledView"
+        else:
+            query = f"SELECT {fields_clause} FROM I_DataExtractionEnabledView"
+
+        try:
+            csrf_token = await self.fetch_csrf_token()
+            headers = self._get_auth_headers()
+            headers["Content-Type"] = "application/sql"
+            headers["Accept"] = "application/xml, text/plain, */*"
+            headers["X-CSRF-Token"] = csrf_token
+
+            client = await self._get_client()
+            resp = await client.post(path, headers=headers, content=query)
+
+            if resp.status_code == 200:
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(resp.text)
+
+                total_rows = 0
+                total_elem = root.find("{http://www.sap.com/adt/dataPreview}totalRows")
+                if total_elem is not None and total_elem.text:
+                    try:
+                        total_rows = int(total_elem.text)
+                    except ValueError:
+                        total_rows = 0
+
+                col_data: Dict[str, List[str]] = {}
+                for col_elem in root.iter("{http://www.sap.com/adt/dataPreview}columns"):
+                    meta = col_elem.find("{http://www.sap.com/adt/dataPreview}metadata")
+                    if meta is not None:
+                        name = (meta.attrib.get("{http://www.sap.com/adt/dataPreview}name") or meta.attrib.get("name") or "").upper()
+                        if name:
+                            col_data[name] = []
+                            dataset = col_elem.find("{http://www.sap.com/adt/dataPreview}dataSet")
+                            if dataset is not None:
+                                for d in dataset.iter("{http://www.sap.com/adt/dataPreview}data"):
+                                    col_data[name].append(d.text or "")
+
+                names = col_data.get("DATAEXTRACTIONVIEWNAME", [])
+                descs = col_data.get("DATAEXTRACTIONVIEWDESCRIPTION", [])
+                rel_states = col_data.get("ISSAPRELEASEDVIEW", [])
+                delta_states = col_data.get("DELTACHGDATACAPTUREISSUPPORTED", [])
+
+                records: Dict[str, Dict[str, Any]] = {}
+                for i, name in enumerate(names):
+                    vname = name.strip()
+                    if not vname:
+                        continue
+                    v_up = vname.upper()
+                    desc = descs[i].strip() if i < len(descs) else ""
+                    rel = rel_states[i].strip() if i < len(rel_states) else ""
+                    delta = delta_states[i].strip() if i < len(delta_states) else ""
+
+                    records[v_up] = {
+                        "view_name": vname,
+                        "description": desc,
+                        "is_sap_released": rel in ("X", "true", "TRUE"),
+                        "delta_cdc_supported": delta in ("X", "true", "TRUE"),
+                        "extraction_status": "VERIFIED_ENABLED",
+                    }
+
+                retrieved_count = len(records)
+                # Query is confirmed complete if we retrieved all reported total rows
+                is_complete = (retrieved_count >= total_rows and total_rows > 0) if total_rows > 0 else (retrieved_count > 0)
+
+                return {
+                    "success": True,
+                    "is_complete": is_complete,
+                    "total_rows_in_sap": total_rows,
+                    "records_count": retrieved_count,
+                    "records": records,
+                    "error": None,
+                }
+            else:
+                err_msg = f"SAP ADT query to I_DataExtractionEnabledView returned HTTP {resp.status_code}: {resp.text[:200]}"
+                logger.error(f"[SAPADTClient] {err_msg}")
+                return {
+                    "success": False,
+                    "is_complete": False,
+                    "total_rows_in_sap": 0,
+                    "records_count": 0,
+                    "records": {},
+                    "error": err_msg,
+                }
+        except Exception as e:
+            err_msg = f"SAP ADT query to I_DataExtractionEnabledView failed: {e}"
+            logger.error(f"[SAPADTClient] {err_msg}")
+            return {
+                "success": False,
+                "is_complete": False,
+                "total_rows_in_sap": 0,
+                "records_count": 0,
+                "records": {},
+                "error": err_msg,
+            }
 
     async def get_transport_requests(self, user: Optional[str] = None) -> List[Dict[str, Any]]:
         """Fetches active CTS transport requests from SAP S/4HANA ADT.

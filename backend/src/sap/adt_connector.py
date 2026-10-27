@@ -1106,6 +1106,14 @@ class SAPADTConnector(ISAPConnector):
         """Retrieves active CTS workbench transport requests from SAP ADT."""
         return await self.client.get_transport_requests(user=user)
 
+    async def get_extraction_metadata_records(
+        self,
+        view_names: Optional[List[str]] = None,
+        max_records: int = 10000,
+    ) -> dict:
+        """Retrieves authoritative data extraction enabled metadata records from I_DataExtractionEnabledView via ADT client."""
+        return await self.client.get_extraction_metadata_records(view_names=view_names, max_records=max_records)
+
     async def aclose(self) -> None:
         """Closes the underlying ADT client session to prevent resource leaks."""
         if hasattr(self.client, "aclose"):
